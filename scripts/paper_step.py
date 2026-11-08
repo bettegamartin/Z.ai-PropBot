@@ -1,0 +1,1078 @@
+"""Live paper-trading harness for the VWAP-fade system (v2, remediated 2026-11-05).
+
+System under test (exact backtest rules, 02_backtest.py VWAPFD variant 1):
+  * Session VWAP from the 10:00 ET bar; sigma = std(close - vwap) expanding.
+  * SHORT when bar High >= vwap + 2.0*sigma  -> signal price max(band, open),
+    stop = fill + 1.2*sigma, target = session VWAP at the signal bar.
+  * LONG symmetric on vwap - 2.0*sigma.
+  * Entry windows: bars stamped 12:00 / 13:00 ET only (backtest entry_cutoff 14).
+    Max 3 trades/day/symbol, one position per symbol, trend filter
+    (|close - day_open| <= 0.6%), flat by 16:00 ET.
+  * Executor: stop checked before target; target needs 1-tick trade-through;
+    costs = $0.60/side + 0.5 tick slippage per side.
+  * Sizing: 2 micros MES + 2 micros MNQ; scale to 4 after +$1,500 cumulative
+    (50% of the $3,000 target).
+Strategy parameters (k, stop_k, trend, caps, sizing, windows) are UNCHANGED
+from the researched configuration and from v1 of this harness.
+
+v2 remediation (per reports/vwap_fade_paper_trading_independent_audit.md):
+  P0.1  Account-level daily loss stop: once the ET-day realized P&L across both
+        symbols reaches -$400, `halted_date` is set in state (persists across
+        restarts) and NO further entries are allowed on any symbol until the
+        next trading day. Table 8: "Halt for the day at -$400 (50K)".
+  P0.2  Executable live fills: in --live the entry is booked at the first
+        price observable when the engine acts (the forming bar's latest price
+        "poll_quote", or the newest completed bar's close if no forming bar is
+        available and it is <= 40 min old). The signal bar's band price is
+        recorded separately as `signal_px`/`signal_ts` and never used as a
+        fill. Stop/target are recomputed from the actual fill. Live exits are
+        only taken from bars that closed AFTER the position was entered.
+        Replay keeps bar-level fills (signal performance) and is tagged
+        fill_method=bar_fill, so signal vs executable performance stay apart.
+  P1.1  Concurrency + crash safety: an flock lockfile guards each run;
+        journal rows carry unique trade_ids and are written once at end of
+        run with idempotent dedup; state.json is saved last. A crash between
+        journal write and state save recovers WITHOUT duplicate rows.
+  P1.2  Replay isolation: --replay writes only to <home>/replay/ and aborts
+        if that resolves to the live directory. Live loaders ignore non-live
+        rows. Replay can no longer contaminate live records.
+  P1.3  Overlays fixed to the research spec (Table 4): Topstep pass requires
+        best day < 55% of target (consistency); Apex drawdown is a $2,500
+        END-OF-DAY trail (hwm_eod from closed equity), not an intraday trail.
+        Both floors now derive from EOD closed-equity HWM.
+  P1.4  Stale/out-of-order data: processed-bar history covers the full fetch
+        window (200 keys/symbol); bars older than the last processed bar are
+        rejected (no state rewind) and warned about; feed health is derived
+        (ok / awaiting first bar / stale / unavailable) and entries are
+        skipped when no fresh observable price exists. The status line never
+        reports a stale feed as healthy.
+
+v2.1 post-audit fixes (per reports/vwap_fade_post_remediation_audit.md):
+  N1    Bot-side daily profit cap (research Table 8: "min(day P&L, firm
+        consistency cap)", e.g. $1,650 = 55% x $3,000 on Topstep). Once the
+        account's realized day P&L reaches the strictest active consistency
+        cap, no further entries on any symbol until the next trading day
+        (persisted cap_blocked_date, P0.1-style triple gate). The overlay
+        PASS gate itself stays strict/truthful: a day that ends >= the cap
+        (only possible via an already-open position riding over it) still
+        blocks the PASS and is reported, never silently truncated.
+  N2    Day-scoped accounting: day P&L, trade counts, traded_today and the
+        Topstep DLL message are computed over day entries DATED TODAY only,
+        so a one-symbol feed outage cannot pollute the EOD summary, inflate
+        minimum-day progress or double-count a stale symbol's P&L.
+  N3    eod_summary's diary write is idempotent: a crash between the direct
+        diary write and the state save no longer duplicates the DAY SUMMARY
+        block (the recovery run detects today's block and skips the rewrite;
+        accounting still recovers single-count via the state save).
+  N4    The replay abort guard is a real, reachable check: replay refuses to
+        run if any replay file path collides with a live file path (or with
+        the live root itself), verified with realpath.
+  Cosmetic: journal clock semantics documented (entry_ts = acting poll time
+        in live mode / signal-bar stamp in replay; exit_ts = exiting bar's
+        stamp -- the two columns intentionally use different clocks);
+        load_state prunes stale day entries against the POLL date (not the
+        wall clock), removing the test-environment pruning artifact.
+
+Modes:
+  --live        poll Yahoo 1h bars, process new closed bars, update state/logs
+  --replay N    smoke test: run last N stored RTH sessions (isolated replay dir)
+  --status      print current paper state (read-only)
+State root: $PAPER_HOME (default /home/z/my-project/download/paper_trading)
+"""
+import fcntl
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+
+ET = ZoneInfo("America/New_York")
+DATA = "/home/z/my-project/download/data"
+
+SPEC = {"ES": dict(yh="ES=F", dpp=5.0, tick_usd=1.25, comm=0.60, slip=0.5),
+        "NQ": dict(yh="NQ=F", dpp=2.0, tick_usd=0.50, comm=0.60, slip=0.5)}
+P = dict(k=2.0, stop_k=1.2, trend=0.006, max_trades=3, cutoff_h=14,
+         base_c=2, scaled_c=4, scale_level=1500.0, dstop=400.0, dll=1000.0)
+TARGET = 3000.0
+OVERLAYS = {
+    # Research Table 4 (Nov 2026): Topstep $2,000 EOD trail + best-day < 55% of
+    # target consistency; Apex $2,500 EOD trail, no consistency cap.
+    "topstep": dict(name="Topstep 50K", dd=2000.0, eval_fee=49.0, act=149.0,
+                    min_days=2, consistency=0.55, floor_cap_be=True),
+    "apex": dict(name="Apex 50K", dd=2500.0, eval_fee=33.0, act=99.0,
+                 min_days=7, consistency=None, floor_cap_be=False),
+}
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+
+MAX_KEY_HIST = 200        # per-symbol retained processed/rejected bar keys (~33 sessions >> 5-day fetch window)
+FRESH_MIN = 40            # a signal bar may only be acted on within 40 min of its close (v1 behaviour, kept)
+STALE_LAG_MIN = 100       # completed-bar lag beyond which the feed is STALE during RTH
+QUOTE_SANE_PCT = 0.05     # quote more than 5% away from last completed close -> distrust quote
+
+# NOTE on clock semantics (post-audit cosmetic finding): in live mode
+# `entry_ts` is the ACTING POLL time (wall clock when the engine acted) while
+# `exit_ts` is the exiting BAR's stamp (bar-clock, i.e. the hour the bar
+# covers). A stop booked from the 13:00-stamped bar therefore shows
+# exit_ts 13:00 < entry_ts 13:20; the bar CLOSES at 14:00, after the entry,
+# so the record is causally consistent but the two columns use different
+# clocks. In replay both use bar-clock. Consumers must not diff these
+# columns as if they shared one clock.
+JOURNAL_COLS = ["mode", "trade_id", "ts", "sym", "side", "contracts",
+                "signal_px", "signal_ts", "entry_px", "entry_ts", "exit_ts",
+                "exit_px", "reason", "fill_method", "exec_lag_min",
+                "gross_usd", "costs_usd", "net_usd", "cum_eq"]
+
+# ---------------- paths (swappable for isolated testing) ----------------
+
+ROOT_HOME = os.environ.get("PAPER_HOME", "/home/z/my-project/download/paper_trading")
+OUT = STATE_F = TRADES_F = EQUITY_F = LOG_F = LOCK_F = None
+
+
+def set_paths(home):
+    """Point every live-mode path at `home` (used by tests for isolation)."""
+    global OUT, STATE_F, TRADES_F, EQUITY_F, LOG_F, LOCK_F
+    OUT = home
+    STATE_F = f"{OUT}/state.json"
+    TRADES_F = f"{OUT}/trades.csv"
+    EQUITY_F = f"{OUT}/equity.csv"
+    LOG_F = f"{OUT}/log.md"
+    LOCK_F = f"{OUT}/.lock"
+
+
+set_paths(ROOT_HOME)
+
+
+def replay_dir_for(out_dir):
+    """Replay writes always go to <current home>/replay, never to live files."""
+    return os.path.abspath(os.path.join(out_dir, "replay"))
+
+
+# ---------------- io helpers ----------------
+
+PENDING_ROWS = []   # journal rows, flushed once at end of run (transactional)
+PENDING_EQ = []     # equity marks
+PENDING_LOGS = []   # diary lines
+
+
+def pending_clear():
+    PENDING_ROWS.clear()
+    PENDING_EQ.clear()
+    PENDING_LOGS.clear()
+
+
+def atomic_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=1, default=str)
+    os.replace(tmp, path)
+
+
+def append_csv(path, row, cols):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    new = not os.path.exists(path)
+    with open(path, "a") as fh:
+        if new:
+            fh.write(",".join(cols) + "\n")
+        fh.write(",".join(str(row.get(c, "")) for c in cols) + "\n")
+
+
+def read_journal(path):
+    """Return (set_of_trade_ids, n_valid_rows); repairs a truncated tail line."""
+    if not os.path.exists(path):
+        return set(), 0
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    if not lines:
+        return set(), 0
+    header = lines[0].split(",")
+    try:
+        tid_i = header.index("trade_id")
+    except ValueError:
+        tid_i = None
+    good, ids, dropped = [], set(), 0
+    for ln in lines[1:]:
+        parts = ln.split(",")
+        if len(parts) != len(header):
+            dropped += 1
+            continue
+        good.append(ln)
+        if tid_i is not None:
+            ids.add(parts[tid_i])
+    if dropped:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            fh.write("\n".join([lines[0]] + good) + "\n")
+        os.replace(tmp, path)
+        print(f"JOURNAL REPAIR: dropped {dropped} malformed row(s) from {os.path.basename(path)}")
+    return ids, len(good)
+
+
+def flush_journal_rows(path, rows):
+    """Append journal rows idempotently: a trade_id already on disk is skipped."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    ids, _ = read_journal(path)
+    new = not os.path.exists(path)
+    appended = skipped = 0
+    with open(path, "a") as fh:
+        if new:
+            fh.write(",".join(JOURNAL_COLS) + "\n")
+        for r in rows:
+            tid = r.get("trade_id")
+            if tid and tid in ids:
+                skipped += 1
+                continue
+            fh.write(",".join(str(r.get(c, "")) for c in JOURNAL_COLS) + "\n")
+            if tid:
+                ids.add(tid)
+            appended += 1
+    return appended, skipped
+
+
+def logline(msg):
+    with open(LOG_F, "a") as fh:
+        fh.write(f"- {msg}\n")
+
+
+def logline_now(msg):
+    """Immediate (unbuffered) diary line -- survives crashes as a run artifact."""
+    try:
+        logline(msg)
+    except OSError:
+        pass
+
+
+def buf_log(msg):
+    PENDING_LOGS.append(msg)
+
+
+def flush_pending(st):
+    """Single end-of-run commit: journal rows -> equity -> diary -> state.
+
+    Ordering makes crash recovery idempotent: rows land on disk before state;
+    a recovery run regenerates the same trade_ids and the dedup skips them.
+    """
+    appended = skipped = 0
+    if PENDING_ROWS:
+        appended, skipped = flush_journal_rows(TRADES_F, PENDING_ROWS)
+    for r in PENDING_EQ:
+        append_csv(EQUITY_F, r, ["ts", "eq", "day"])
+    if PENDING_LOGS:
+        with open(LOG_F, "a") as fh:
+            for m in PENDING_LOGS:
+                fh.write(f"- {m}\n" if not m.startswith("**") else m + "\n")
+    if skipped:
+        print(f"JOURNAL DEDUP: {skipped} row(s) skipped (trade_id already on disk)")
+    PENDING_ROWS.clear()
+    PENDING_EQ.clear()
+    PENDING_LOGS.clear()
+    atomic_json(STATE_F, st)
+    return appended, skipped
+
+
+# ---------------- data ----------------
+
+def fetch_1h(yh, want_quote=False):
+    """Yahoo 1h bars -> (DataFrame(O,H,L,C,V) tz ET, quote) for RTH bars.
+
+    Returns completed bars only (bar close + 90s <= now). When want_quote is
+    True it also returns an observable-price dict for the forming bar:
+      dict(px=latest price, ts=bar stamp, method='poll_quote') or None.
+    Yahoo futures data is delayed/indicative -- the delay is NOT compensated
+    anywhere and fill_method tags record which price class was used.
+    """
+    for host in ("query1", "query2"):
+        url = (f"https://{host}.finance.yahoo.com/v8/finance/chart/{yh}"
+               f"?range=5d&interval=1h")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                js = json.load(r)
+            res = js["chart"]["result"][0]
+            ts = res.get("timestamp") or []
+            q = res["indicators"]["quote"][0]
+            now = datetime.now(ET)
+            rows, forming = [], None
+            for i, t in enumerate(ts):
+                o, h, l, c, v = (q[k][i] for k in ("open", "high", "low", "close", "volume"))
+                if None in (o, h, l, c) or not v:
+                    continue
+                dt = datetime.fromtimestamp(t, tz=ZoneInfo("UTC")).astimezone(ET)
+                rec = (dt, float(o), float(h), float(l), float(c), float(v))
+                rows.append(rec)
+                if dt + timedelta(hours=1) > now - timedelta(seconds=90):
+                    forming = rec                     # most recent still-forming bar
+            if not rows:
+                continue
+            df = pd.DataFrame(rows, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
+            df = df.set_index("ts").sort_index()
+            df = df.between_time("10:00", "15:59")          # clean RTH bars
+            df = df[[t + timedelta(hours=1) <= now - timedelta(seconds=90)
+                     for t in df.index]]                     # completed bars only
+            quote = None
+            if want_quote and forming is not None:
+                quote = dict(px=forming[4], ts=forming[0], method="poll_quote")
+                if len(df) and abs(quote["px"] - float(df["Close"].iloc[-1])) > QUOTE_SANE_PCT * float(df["Close"].iloc[-1]):
+                    quote = None                            # implausible forming price -> distrust
+            return (df, quote) if want_quote else df
+        except Exception:
+            continue
+    return (None, None) if want_quote else None
+
+
+FETCH_IMPL = fetch_1h
+
+
+def replay_bars(sym, n_days):
+    """Last n stored RTH sessions (>=5 bars) from the research data, sequential."""
+    df = pd.read_csv(f"{DATA}/{sym.lower()}_1h.csv", index_col=0)
+    df.index = pd.to_datetime(df.index, utc=True).tz_convert(ET)
+    rth = df.between_time("10:00", "15:59")
+    rth = rth[rth["Volume"] > 0]
+    days = [g for _, g in rth.groupby(rth.index.normalize()) if len(g) >= 5]
+    return days[-n_days:]
+
+
+# ---------------- state ----------------
+
+def fresh_state():
+    return dict(schema_version=2,
+                cum=0.0, n_trades=0, n_entries=0, trading_days=0, traded_today=False,
+                today=datetime.now(ET).date().isoformat(), day={},
+                done_bars={}, rejected_bars={}, last_bar_ts={}, feed_status={},
+                halted_date=None, halted_reason=None,
+                cap_blocked_date=None, cap_blocked_reason=None,
+                last_summary=None, started=datetime.now(ET).isoformat(),
+                overlays={k: dict(base_cum=0.0, hwm_eod=0.0, floor=-OVERLAYS[k]["dd"],
+                                  tdays=0, fees=0.0, attempts=1, best_day=0.0,
+                                  start=datetime.now(ET).date().isoformat())
+                          for k in OVERLAYS})
+
+
+def migrate_state(st, today):
+    """Bring a pre-remediation state up to schema v2 (idempotent)."""
+    changed = []
+    if st.get("schema_version") != 2:
+        st["schema_version"] = 2
+        changed.append("schema_version=2")
+    st.setdefault("rejected_bars", {})
+    st.setdefault("last_bar_ts", {})
+    st.setdefault("feed_status", {})
+    st.setdefault("halted_date", None)
+    st.setdefault("halted_reason", None)
+    st.setdefault("cap_blocked_date", None)
+    st.setdefault("cap_blocked_reason", None)
+    for k, ov in st.get("overlays", {}).items():
+        if "best_day" not in ov:
+            ov["best_day"] = 0.0
+            changed.append(f"overlay {k}: best_day=0.0")
+        ov.pop("hwm", None)                    # intraday trail artefact removed
+    if not st.get("last_bar_ts"):
+        for sym, keys in st.get("done_bars", {}).items():
+            if keys:
+                st["last_bar_ts"][sym] = max(keys)
+                changed.append(f"last_bar_ts[{sym}]={max(keys)[:16]}")
+    for sym in list(st.get("day", {}).keys()):
+        d = st["day"][sym]
+        if d and d["date"] != today:
+            if d.get("pos"):
+                continue                       # handled by bar_step on next bar (eod_missed)
+            del st["day"][sym]
+            changed.append(f"pruned stale day[{sym}] dated {d['date']} (no open position)")
+    return changed
+
+
+def load_state(today=None):
+    """Load (or create) state; `today` lets the caller pin the pruning date.
+
+    migrate_state prunes stale day entries against `today`. run_live passes
+    the POLL date so an injected/backdated poll never prunes against the
+    wrong day (post-audit cosmetic finding iii); the default stays the wall
+    clock for every other caller.
+    """
+    st = json.load(open(STATE_F)) if os.path.exists(STATE_F) else fresh_state()
+    today = today or datetime.now(ET).date().isoformat()
+    changed = migrate_state(st, today)
+    if changed:
+        print("STATE MIGRATION (schema v2): " + "; ".join(changed))
+    return st
+
+
+# ---------------- engine ----------------
+
+def new_day(date):
+    return dict(date=date, vwap_n=0.0, vwap_d=0.0, devs=[], day_open=None,
+                trades=0, pos=None, day_realized=0.0, halted=False,
+                halted_reason=None, last_close=None, last_ts=None, mark_px=None)
+
+
+def open_pos(d):
+    return d["pos"] is not None
+
+
+def account_day_pnl(st, date):
+    return sum(dd["day_realized"] for dd in st["day"].values() if dd and dd["date"] == date)
+
+
+def check_daily_stop(st, d, sym):
+    """P0.1: account-level daily loss stop (Table 8: halt for the day at -$400).
+
+    Evaluated on realized day P&L across BOTH symbols after every close; sets
+    halted_date in state (persists across restarts) and per-symbol halted flags.
+    Resets automatically when a new trading day starts (halted_date is compared
+    against the bar date everywhere).
+    """
+    if st.get("halted_date") == d["date"]:
+        return
+    day = account_day_pnl(st, d["date"])
+    if day <= -P["dstop"]:
+        st["halted_date"] = d["date"]
+        st["halted_reason"] = (f"account day P&L {day:+.2f} breached the "
+                               f"-${P['dstop']:.0f} daily stop")
+        for dd in st["day"].values():
+            if dd and dd["date"] == d["date"]:
+                dd["halted"] = True
+                dd["halted_reason"] = st["halted_reason"]
+        buf_log(f"**DAILY STOP {d['date']}: {st['halted_reason']} — no further entries "
+                f"on any symbol until the next trading day (sym {sym} closed a trade)**")
+
+
+def consistency_cap_usd(st):
+    """N1: strictest daily profit cap among ACTIVE consistency-capped overlays.
+
+    Research Table 8 bot layer: "daily profit cap = min(day P&L, firm
+    consistency cap)" — e.g. $1,650.00 = round(0.55 x $3,000) on Topstep.
+    Returns None when no active overlay has a consistency rule (Apex).
+    """
+    caps = [round(OVERLAYS[k]["consistency"] * TARGET, 2)
+            for k, ov in st.get("overlays", {}).items()
+            if not ov.get("done") and OVERLAYS[k].get("consistency") is not None]
+    return min(caps) if caps else None
+
+
+def cap_allows_entry(st, date):
+    """N1 entry gate: day P&L must stay strictly below the consistency cap.
+
+    Triple gate, P0.1-style: the persisted cap_blocked_date flag, the live
+    account-day P&L condition, and (via check_daily_cap) the flag being set
+    the moment a close reaches the cap. A restart cannot re-enter past the
+    cap, and neither can a path that missed the flag.
+    """
+    cap = consistency_cap_usd(st)
+    if cap is None:
+        return True
+    if st.get("cap_blocked_date") == date:
+        return False
+    return account_day_pnl(st, date) < cap
+
+
+def check_daily_cap(st, d, sym):
+    """N1: fire the daily profit cap the moment a close reaches it.
+
+    Runs after every close (day P&L only changes on closes), symmetric with
+    check_daily_stop. Residual tail (documented, accepted): an ALREADY-OPEN
+    position may ride a day from below the cap to at/above it — the day then
+    ends over the cap, the overlay PASS gate reports it truthfully and the
+    attempt cannot pass; the researched bot cannot un-realize that P&L.
+    """
+    if st.get("cap_blocked_date") == d["date"]:
+        return
+    cap = consistency_cap_usd(st)
+    if cap is None:
+        return
+    day = account_day_pnl(st, d["date"])
+    if day >= cap:
+        st["cap_blocked_date"] = d["date"]
+        st["cap_blocked_reason"] = (f"account day P&L {day:+.2f} reached the "
+                                    f"${cap:.0f} consistency cap (bot-side daily "
+                                    f"profit cap)")
+        for dd in st["day"].values():
+            if dd and dd["date"] == d["date"]:
+                dd["cap_blocked"] = True
+                dd["cap_blocked_reason"] = st["cap_blocked_reason"]
+        buf_log(f"**DAILY PROFIT CAP {d['date']}: {st['cap_blocked_reason']} — no further "
+                f"entries on any symbol until the next trading day (sym {sym} closed a trade)**")
+
+
+def close_pos(d, px, ts, reason, sym, st, mode):
+    pos = d["pos"]
+    if not isinstance(ts, datetime):
+        ts = datetime.fromisoformat(str(ts))
+    ets = pos["entry_ts"] if isinstance(pos["entry_ts"], datetime) \
+        else datetime.fromisoformat(str(pos["entry_ts"]))
+    spec = SPEC[sym]
+    per_ct = (px - pos["entry_px"]) * pos["side"] * spec["dpp"]
+    costs = (spec["comm"] * 2 + spec["slip"] * spec["tick_usd"] * 2) * pos["contracts"]
+    net = per_ct * pos["contracts"] - costs
+    d["day_realized"] += net
+    st["cum"] += net
+    st["n_trades"] += 1
+    PENDING_ROWS.append(dict(
+        mode=mode, trade_id=pos.get("trade_id", ""), ts=ts.isoformat(), sym=sym,
+        side="long" if pos["side"] > 0 else "short",
+        contracts=pos["contracts"],
+        signal_px=round(pos.get("signal_px", pos["entry_px"]), 2),
+        signal_ts=pos.get("signal_ts", ets).isoformat() if isinstance(pos.get("signal_ts", ets), datetime)
+                  else str(pos.get("signal_ts", ets)),
+        entry_px=round(pos["entry_px"], 2),
+        entry_ts=ets.isoformat(), exit_ts=ts.isoformat(),
+        exit_px=round(px, 2), reason=reason,
+        fill_method=pos.get("fill_method", "bar_fill"),
+        exec_lag_min=pos.get("exec_lag_min", 0),
+        gross_usd=round(per_ct * pos["contracts"], 2),
+        costs_usd=round(costs, 2), net_usd=round(net, 2), cum_eq=round(st["cum"], 2)))
+    buf_log(f"`{mode}` {ts:%m-%d %H:%M} ET **{sym} {pos['contracts']} micro "
+            f"{'LONG' if pos['side'] > 0 else 'SHORT'} closed ({reason})** "
+            f"{pos['entry_px']:.2f} -> {px:.2f} = ${net:+.2f} (day {d['day_realized']:+.2f}, cum ${st['cum']:+.2f})")
+    d["pos"] = None
+    check_daily_stop(st, d, sym)
+    check_daily_cap(st, d, sym)
+    return net
+
+
+def contracts_for(st):
+    return P["scaled_c"] if st["cum"] >= P["scale_level"] else P["base_c"]
+
+
+def _as_dt(x):
+    return x if isinstance(x, datetime) else datetime.fromisoformat(str(x))
+
+
+def live_enter(sym, st, d, side, signal_px, sig_bar, sd, vwap, now_ts, quote, mode):
+    """P0.2: enter at the first price observable at action time.
+
+    signal_px  = band price the researched strategy would have filled at the
+                 signal bar (recorded only, NEVER used as a live fill).
+    fill price = observable price carried in `quote` (poll forming price, or
+                 the newest completed close when no forming bar exists and the
+                 completed close is <= 40 min old).
+    Stop/target are recomputed from the fill; target stays the signal-bar VWAP.
+    """
+    ts = sig_bar[5]
+    fill_px = float(quote["px"])
+    method = quote.get("method", "poll_quote")
+    lag = max(int((now_ts - (ts + timedelta(hours=1))).total_seconds() // 60), 0)
+    tid = f"{ts.date().isoformat()}_{sym}_{d['trades'] + 1:02d}"
+    if side < 0:
+        pos = dict(side=-1, entry_px=fill_px, stop_px=fill_px + P["stop_k"] * sd,
+                   tp_px=vwap, signal_px=signal_px, signal_ts=ts,
+                   entry_ts=now_ts, entry_exec_ts=now_ts, contracts=contracts_for(st),
+                   fill_method=method, exec_lag_min=lag, trade_id=tid)
+    else:
+        pos = dict(side=1, entry_px=fill_px, stop_px=fill_px - P["stop_k"] * sd,
+                   tp_px=vwap, signal_px=signal_px, signal_ts=ts,
+                   entry_ts=now_ts, entry_exec_ts=now_ts, contracts=contracts_for(st),
+                   fill_method=method, exec_lag_min=lag, trade_id=tid)
+    d["pos"] = pos
+    d["trades"] += 1
+    st["n_entries"] += 1
+    buf_log(f"`{mode}` {now_ts:%m-%d %H:%M} ET **{sym} {pos['contracts']} micro "
+            f"{'SHORT' if side < 0 else 'LONG'} opened** signal {signal_px:.2f} "
+            f"({ts:%H:%M} bar) -> filled {fill_px:.2f} @ {now_ts:%H:%M} "
+            f"({method}, lag {lag}m; stop {pos['stop_px']:.2f}, target {pos['tp_px']:.2f}, "
+            f"sd {sd:.2f}, id {tid})")
+    # target already traded through at action time -> exit at the observable price
+    tick = 0.25
+    if side < 0 and fill_px <= pos["tp_px"] - tick:
+        buf_log(f"`{mode}` target already traded through at action time "
+                f"({sym} fill {fill_px:.2f} <= target-tick {pos['tp_px'] - tick:.2f}) "
+                f"-> immediate exit at the observable price")
+        close_pos(d, fill_px, now_ts, "tp_poll", sym, st, mode)
+    elif side > 0 and fill_px >= pos["tp_px"] + tick:
+        buf_log(f"`{mode}` target already traded through at action time "
+                f"({sym} fill {fill_px:.2f} >= target+tick {pos['tp_px'] + tick:.2f}) "
+                f"-> immediate exit at the observable price")
+        close_pos(d, fill_px, now_ts, "tp_poll", sym, st, mode)
+    return pos
+
+
+def bar_step(sym, bar, st, mode, now_ts=None, quote=None):
+    o, h, l, c, v, ts = bar
+    if mode == "live" and now_ts is None:
+        now_ts = datetime.now(ET)          # defensive: live entries need a wall clock
+    spec = SPEC[sym]
+    if sym not in st["day"] or st["day"][sym]["date"] != ts.date().isoformat():
+        prev = st["day"].get(sym)
+        if prev and prev.get("pos"):
+            close_pos(prev, prev["last_close"], prev["last_ts"], "eod_missed", sym, st, mode)
+        st["day"][sym] = new_day(ts.date().isoformat())
+    d = st["day"][sym]
+    if d["day_open"] is None:
+        d["day_open"] = o
+    # session VWAP + expanding sigma (includes current bar, as in backtest)
+    d["vwap_n"] += (h + l + c) / 3 * v
+    d["vwap_d"] += v
+    vwap = d["vwap_n"] / max(d["vwap_d"], 1e-9)
+    devs = d["devs"] + [c - vwap]
+    sd = float(np.std(devs, ddof=1)) if len(devs) >= 2 else 0.0
+    d["last_close"] = c
+    d["last_ts"] = ts
+    tick = 0.25
+    live = (mode == "live")
+
+    # 1) exits on an open position: stop first, then target (trade-through).
+    #    In live mode a resting order could not have existed before the entry
+    #    was actioned, so bars that closed before the entry action are skipped.
+    if open_pos(d):
+        pos = d["pos"]
+        exec_ts = _as_dt(pos["entry_exec_ts"]) if pos.get("entry_exec_ts") else None
+        predates = live and exec_ts is not None and (ts + timedelta(hours=1)) <= exec_ts
+        if not predates:
+            if pos["side"] > 0 and l <= pos["stop_px"]:
+                close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+            elif pos["side"] < 0 and h >= pos["stop_px"]:
+                close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+            elif pos["side"] > 0 and h >= pos["tp_px"] + tick:
+                close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+            elif pos["side"] < 0 and l <= pos["tp_px"] - tick:
+                close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+
+    # 2) entries: bars stamped 12:00/13:00 ET (i>=2, hour<14), fresh bar only.
+    #    P0.1: the daily-stop gate checks BOTH the persisted halted_date flag
+    #    and the live account-day P&L condition, so a restart (or any path
+    #    that missed the flag) still cannot enter past the -$400 stop.
+    #    N1: the same triple-gate pattern for the consistency daily profit cap.
+    if (not open_pos(d) and len(devs) >= 3 and ts.hour < P["cutoff_h"]
+            and d["trades"] < P["max_trades"] and not d["halted"]
+            and st.get("halted_date") != ts.date().isoformat()
+            and account_day_pnl(st, ts.date().isoformat()) > -P["dstop"]
+            and cap_allows_entry(st, ts.date().isoformat())):
+        fresh = now_ts is None or (ts + timedelta(hours=1)) >= now_ts - timedelta(minutes=FRESH_MIN)
+        if fresh and abs(c - d["day_open"]) <= P["trend"] * d["day_open"] and sd > 0:
+            up, dn = vwap + P["k"] * sd, vwap - P["k"] * sd
+            if h >= up:
+                side, signal_px = -1, max(up, o)
+            elif l <= dn:
+                side, signal_px = 1, min(dn, o)
+            else:
+                side, signal_px = None, None
+            if side is not None:
+                if live:
+                    if quote is None:
+                        # Defence-in-depth (post-audit cosmetic finding ii): this
+                        # branch is unreachable through run_live -- the fallback
+                        # observable (last_completed_close <= 40 min old) always
+                        # supplies a price while a signal bar is fresh. It stays
+                        # as the conservative backstop at bar_step level.
+                        buf_log(f"`{mode}` {ts:%m-%d %H:%M} ET {sym} signal "
+                                f"({'SHORT' if side < 0 else 'LONG'} @ {signal_px:.2f}) NOT taken: "
+                                f"no fresh observable price at the acting poll (stale/delayed feed)")
+                    else:
+                        live_enter(sym, st, d, side, signal_px, bar, sd, vwap, now_ts, quote, mode)
+                else:
+                    # replay/signal mode: backtest bar-level fill + same-bar exits
+                    n = contracts_for(st)
+                    tid = f"{ts.date().isoformat()}_{sym}_{d['trades'] + 1:02d}"
+                    if side < 0:
+                        pos = dict(side=-1, entry_px=signal_px, stop_px=signal_px + P["stop_k"] * sd,
+                                   tp_px=vwap, signal_px=signal_px, signal_ts=ts,
+                                   entry_ts=ts, contracts=n, fill_method="bar_fill",
+                                   exec_lag_min=0, trade_id=tid)
+                    else:
+                        pos = dict(side=1, entry_px=signal_px, stop_px=signal_px - P["stop_k"] * sd,
+                                   tp_px=vwap, signal_px=signal_px, signal_ts=ts,
+                                   entry_ts=ts, contracts=n, fill_method="bar_fill",
+                                   exec_lag_min=0, trade_id=tid)
+                    d["pos"] = pos
+                    d["trades"] += 1
+                    st["n_entries"] += 1
+                    buf_log(f"`{mode}` {ts:%m-%d %H:%M} ET **{sym} {n} micro "
+                            f"{'SHORT' if pos['side'] < 0 else 'LONG'} opened** @ {pos['entry_px']:.2f} "
+                            f"(stop {pos['stop_px']:.2f}, target {pos['tp_px']:.2f}, sd {sd:.2f}, id {tid})")
+                    # same-bar stop/target (replicates backtest executor)
+                    if pos["side"] < 0 and h >= pos["stop_px"]:
+                        close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+                    elif pos["side"] > 0 and l <= pos["stop_px"]:
+                        close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+                    elif pos["side"] < 0 and l <= pos["tp_px"] - tick:
+                        close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+                    elif pos["side"] > 0 and h >= pos["tp_px"] + tick:
+                        close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+
+    # 3) EOD flat on the 15:00-16:00 bar (or any late bar at day end)
+    if open_pos(d) and ts.hour == 15:
+        close_pos(d, c, ts, "eod", sym, st, mode)
+
+    d["devs"] = devs
+    return d
+
+
+def open_pnl(st):
+    tot = 0.0
+    for sym, d in st["day"].items():
+        if d and d.get("pos") and (d.get("mark_px") or d.get("last_close")) is not None:
+            spec = SPEC[sym]
+            pos = d["pos"]
+            # explicit None cascade (fix-bench finding): new_day() seeds
+            # mark_px=None, so .get("mark_px", default) would return the None
+            # VALUE while the key exists; fall through to last_close instead.
+            px = d.get("mark_px")
+            if px is None:
+                px = d.get("last_close")
+            tot += (px - pos["entry_px"]) * pos["side"] * spec["dpp"] * pos["contracts"]
+    return tot
+
+
+def overlay_update(st, eod=False, write=True, date=None):
+    """Overlay accounting per research Table 4.
+
+    Both floors are EOD trails: hwm_eod is the high-water mark of CLOSED equity
+    at day summaries; intraday equity never raises the floor. Topstep pass
+    additionally requires the best day < 55% of target (consistency). Bust is
+    still evaluated against current equity (a live breach would be real).
+
+    N2: `date` scopes the day P&L to day entries DATED `date` (live callers
+    pass the poll date). A one-symbol feed outage then leaves yesterday's day
+    entry inert instead of polluting today's P&L, traded_today-based tdays and
+    the DLL message. date=None (replay, seeded benches) sums all day entries,
+    which is correct there because replay clears st["day"] after each day.
+    """
+    now = datetime.now(ET)
+    eq = st["cum"] + open_pnl(st)
+    day_pnl = sum(d["day_realized"] for d in st["day"].values()
+                  if d and (date is None or d["date"] == date))
+    msgs = []
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            continue
+        oeq = eq - ov["base_cum"]
+        # EOD bookkeeping first, so the floor derived below reflects this EOD
+        if eod and st["traded_today"]:
+            ov["tdays"] += 1
+            ov["hwm_eod"] = max(ov["hwm_eod"], st["cum"] - ov["base_cum"])
+            ov["best_day"] = max(ov.get("best_day", 0.0), day_pnl)
+        # EOD trail for BOTH overlays (P1.3; the old intraday Apex trail is gone)
+        floor = ov["hwm_eod"] - cfg["dd"]
+        if cfg.get("floor_cap_be"):
+            floor = min(floor, 0.0)            # Topstep: floor never rises above breakeven
+        ov["floor"] = floor
+        if oeq <= ov["floor"]:
+            ov["fees"] += cfg["eval_fee"]
+            ov["attempts"] += 1
+            if write:
+                buf_log(f"**{cfg['name']} overlay: WOULD BE BUSTED** {now:%m-%d %H:%M} ET "
+                        f"(eq {oeq:+.0f} vs floor {ov['floor']:+.0f}). New attempt, "
+                        f"fees so far ${ov['fees']:.0f}, attempts {ov['attempts']}")
+            ov.update(base_cum=st["cum"], hwm_eod=0.0, floor=-cfg["dd"],
+                      tdays=0, fees=ov["fees"], attempts=ov["attempts"],
+                      best_day=0.0, start=now.date().isoformat())
+            continue
+        if day_pnl <= -P["dll"] and key == "topstep" and not ov.get("dll_today") == st["today"]:
+            ov["dll_today"] = st["today"]
+            msgs.append(f"Topstep DLL ${-P['dll']:.0f} hit (day {day_pnl:+.0f}) -> would flatten for the day")
+        ocum = st["cum"] - ov["base_cum"]
+        if ocum >= TARGET and ov["tdays"] >= cfg["min_days"]:
+            cap = cfg.get("consistency")
+            cap_usd = round(cap * TARGET, 2) if cap is not None else None
+            if cap is not None and ov.get("best_day", 0.0) >= cap_usd:
+                msg = (f"{cfg['name']} target reached but the consistency cap blocks a PASS "
+                       f"(best day ${ov.get('best_day', 0.0):.0f} >= {cap_usd:.0f} = "
+                       f"{cap:.0%} of target) -- keeps trading")
+                if msg not in msgs:
+                    msgs.append(msg)
+                continue
+            ov["fees"] += cfg["act"]
+            ov["done"] = True
+            ov["passed_on"] = now.date().isoformat()
+            if write:
+                buf_log(f"**{cfg['name']} overlay: WOULD HAVE PASSED the evaluation** on "
+                        f"{ov['passed_on']} (profit {ocum:+.0f}, {ov['tdays']} trading days, "
+                        f"best day ${ov.get('best_day', 0.0):.0f}, "
+                        f"eval fees paid ${ov['fees']:.0f}, attempts {ov['attempts']})")
+    return eq, msgs
+
+
+def eod_summary(st):
+    if st.get("last_summary") == st["today"]:
+        return None
+    st["last_summary"] = st["today"]
+    # N2: today's numbers are scoped to day entries DATED today.
+    day_pnl = sum(d["day_realized"] for d in st["day"].values()
+                  if d and d["date"] == st["today"])
+    n_today = sum(d["trades"] for d in st["day"].values()
+                  if d and d["date"] == st["today"])
+    if st["traded_today"]:
+        st["trading_days"] += 1
+    eq, msgs = overlay_update(st, eod=True, date=st["today"])
+    lines = [f"**DAY SUMMARY {st['today']}** — trades: {n_today}, day P&L: "
+             f"${day_pnl:+.2f}, cumulative: ${st['cum']:+.2f} "
+             f"({st['cum'] / TARGET * 100:+.0f}% of $3,000 target)"]
+    if st.get("halted_date") == st["today"]:
+        lines.append(f"DAILY STOP active today: {st.get('halted_reason', '')}")
+    if st.get("cap_blocked_date") == st["today"]:
+        lines.append(f"DAILY PROFIT CAP active today: {st.get('cap_blocked_reason', '')}")
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            lines.append(f"{cfg['name']}: PASSED {ov['passed_on']} (fees ${ov['fees']:.0f})")
+        else:
+            ocum = st["cum"] - ov["base_cum"]
+            lines.append(f"{cfg['name']}: profit {ocum:+.0f}/{TARGET:.0f}, floor "
+                         f"{ov['floor']:+.0f}, tdays {ov['tdays']}, best day "
+                         f"${ov.get('best_day', 0.0):+.0f}, fees ${ov['fees']:.0f}, "
+                         f"attempts {ov['attempts']}")
+    for m in msgs:
+        lines.append(m)
+    # N3: idempotent diary write. The summary lines are written DIRECTLY (not
+    # through PENDING_LOGS), so a crash between this write and the end-of-run
+    # state save used to duplicate the block on the recovery run. Today's
+    # marker on disk means a prior attempt already wrote it -- skip the
+    # rewrite. Everything else (state mutations, the equity row) still runs:
+    # a crashed attempt never reached flush_pending, so they are not on disk.
+    marker = f"**DAY SUMMARY {st['today']}**"
+    already_written = False
+    try:
+        with open(LOG_F) as fh:
+            already_written = marker in fh.read()
+    except OSError:
+        pass
+    if not already_written:
+        with open(LOG_F, "a") as fh:
+            fh.write("\n".join(x if x.startswith("**") else f"- {x}" for x in lines) + "\n")
+    PENDING_EQ.append(dict(ts=datetime.now(ET).isoformat(), eq=round(st["cum"], 2),
+                           day=round(day_pnl, 2)))
+    return " ".join(lines)
+
+
+# ---------------- live mode ----------------
+
+def in_rth(now):
+    return now.weekday() < 5 and 10 <= now.hour < 16
+
+
+def classify_feed(df, quote, now):
+    """Feed health for one symbol: never reports stale data as healthy."""
+    if df is None or df.empty:
+        return "unavailable"
+    has_today = any(ts.date() == now.date() for ts in df.index)
+    newest_close = df.index[-1] + timedelta(hours=1)
+    lag = (now - newest_close).total_seconds() / 60.0
+    if quote is not None:
+        return "ok"
+    if has_today and lag > STALE_LAG_MIN:
+        return f"stale (newest completed bar {lag:.0f} min old)"
+    if not has_today and in_rth(now) and now.hour >= 11:
+        return f"stale (no completed bars today as of {now:%H:%M} ET)"
+    if not has_today:
+        return "awaiting first completed bar"
+    return "ok"
+
+
+def run_live(now=None, fetch=None):
+    os.makedirs(OUT, exist_ok=True)
+    lock = open(LOCK_F, "w")
+    try:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("SKIP: another paper_step --live run holds the lock (overlap guard).")
+            return
+        pending_clear()
+        now = now or datetime.now(ET)
+        fetch = fetch or FETCH_IMPL
+        st = load_state(today=now.date().isoformat())
+        st["today"] = now.date().isoformat()
+        st["traded_today"] = False
+        logline_now(f"--- live run {now.isoformat()} ---")
+        if now.weekday() >= 5:
+            print(f"WEEKEND {now:%a %H:%M} ET — market closed, no action.")
+            return
+        notes = []
+        for sym in ("ES", "NQ"):
+            try:
+                res = fetch(SPEC[sym]["yh"], want_quote=True)
+            except TypeError:
+                res = fetch(SPEC[sym]["yh"])
+            if isinstance(res, tuple):
+                df, quote = res
+            else:
+                df, quote = res, None
+            status = classify_feed(df, quote, now)
+            st["feed_status"][sym] = status
+            if status == "unavailable":
+                notes.append(f"{sym}: feed unavailable")
+                continue
+            if status != "ok" and not status.startswith("awaiting"):
+                notes.append(f"{sym}: feed {status}")
+            if status.startswith("awaiting"):
+                notes.append(f"{sym}: awaiting first completed bar")
+            if quote is None and df is not None and len(df):
+                # fallback observable: newest completed close if it is fresh enough
+                newest_close = df.index[-1] + timedelta(hours=1)
+                if (now - newest_close).total_seconds() / 60.0 <= FRESH_MIN:
+                    quote = dict(px=float(df["Close"].iloc[-1]), ts=df.index[-1],
+                                 method="last_completed_close")
+            done = set(st["done_bars"].get(sym, []))
+            rejected = set(st["rejected_bars"].get(sym, []))
+            last_ts = st["last_bar_ts"].get(sym)
+            rej_new = 0
+            for ts, row in df.iterrows():
+                key = ts.isoformat()
+                if key in done:
+                    continue
+                if last_ts and ts <= datetime.fromisoformat(last_ts):
+                    if key not in rejected:
+                        rejected.add(key)
+                        rej_new += 1
+                    continue          # P1.4: never rewind state with old bars
+                d = bar_step(sym, (row["Open"], row["High"], row["Low"], row["Close"],
+                                   row["Volume"], ts), st, "live", now_ts=now, quote=quote)
+                done.add(key)
+                st["last_bar_ts"][sym] = key
+                # N2: only a day entry DATED the poll date counts as trading today
+                # (a recovered past-date bar steps its own past day entry).
+                if d["trades"] and d["date"] == st["today"]:
+                    st["traded_today"] = True
+            st["done_bars"][sym] = sorted(done)[-MAX_KEY_HIST:]
+            st["rejected_bars"][sym] = sorted(rejected)[-MAX_KEY_HIST:]
+            if rej_new:
+                notes.append(f"{sym}: {rej_new} stale/out-of-order bar(s) rejected (no rewind)")
+            dd = st["day"].get(sym)
+            if dd and dd["date"] == st["today"] and dd.get("pos") and quote is not None:
+                dd["mark_px"] = float(quote["px"])
+        if not st["traded_today"]:
+            # N2: date-scoped fallback -- a stale day entry from a feed-dead
+            # symbol must not claim "traded today" on a zero-trade day.
+            st["traded_today"] = any(d["trades"] for d in st["day"].values()
+                                     if d and d["date"] == st["today"])
+        eq, dllmsgs = overlay_update(st, eod=False, date=st["today"])
+        summary = None
+        if now.hour >= 16:
+            summary = eod_summary(st)
+        flush_pending(st)
+        pos_desc = []
+        for sym, d in st["day"].items():
+            if d and d.get("pos"):
+                p = d["pos"]
+                pos_desc.append(f"{sym} {'L' if p['side'] > 0 else 'S'}{p['contracts']}"
+                                f"@{p['entry_px']:.2f}")
+        ov = st["overlays"]
+        ap, ts_ = ov["apex"], ov["topstep"]
+        halt_mark = " | DAILY STOP ACTIVE" if st.get("halted_date") == st["today"] else ""
+        fs = st.get("feed_status", {})
+        short = lambda s: str(s).split()[0] if s else "?"   # ok / stale / awaiting / unavailable
+        feed_note = f"feed ES:{short(fs.get('ES'))} NQ:{short(fs.get('NQ'))}"
+        if notes:
+            feed_note += " | " + " | ".join(notes)
+        print(f"LIVE {now:%a %m-%d %H:%M} ET | cum ${st['cum']:+.2f} | open: "
+              f"{', '.join(pos_desc) if pos_desc else 'flat'} | "
+              f"Apex floor {ap['floor']:+.0f} | Topstep floor {ts_['floor']:+.0f} | "
+              f"{feed_note}{halt_mark}")
+        if summary:
+            print(summary)
+    finally:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock.close()
+
+
+# ---------------- replay mode (isolated) ----------------
+
+def run_replay(n):
+    """Replay runs in an ISOLATED journal/state space: <current home>/replay/.
+
+    P1.2: it can never write the live trades.csv/state.json/log.md. N4: the
+    abort guard is now a REAL, reachable check -- replay refuses to run if
+    any would-be replay file path collides with a live file path (realpath
+    comparison) or if the replay directory itself resolves onto the live
+    root. With the stock replay_dir_for the collision is structurally
+    impossible; the guard fires only if that invariant is ever broken.
+    """
+    rdir = replay_dir_for(OUT)
+    live_files = {os.path.realpath(p) for p in (STATE_F, TRADES_F, EQUITY_F, LOG_F, LOCK_F)}
+    replay_files = {os.path.realpath(os.path.join(rdir, b))
+                    for b in ("state.json", "trades.csv", "equity.csv", "log.md", ".lock")}
+    if (replay_files & live_files
+            or os.path.realpath(rdir) == os.path.realpath(ROOT_HOME)
+            or os.path.realpath(rdir) == os.path.realpath(OUT)):
+        print("ABORT: replay directory resolves onto the live files -- refusing to run.")
+        return
+    prev = (OUT, STATE_F, TRADES_F, EQUITY_F, LOG_F, LOCK_F)
+    os.makedirs(rdir, exist_ok=True)
+    set_paths(rdir)
+    pending_clear()
+    try:
+        st = fresh_state()
+        st["today"] = "replay"
+        print(f"REPLAY of last {n} stored RTH sessions through the paper engine "
+              f"(2 micros/symbol, real costs; ISOLATED journal: {TRADES_F}):\n")
+        day_list = replay_bars("ES", n)
+        dates = [g.index[0].date() for g in day_list]
+        for di, date in enumerate(dates):
+            for sym in ("ES", "NQ"):
+                days = replay_bars(sym, n)
+                # guard: only replay an NQ session whose date truly matches (audit M7)
+                g = days[di]
+                if g.index[0].date().isoformat() != date.isoformat():
+                    print(f"  {date} {sym}: no matching stored session -- skipped "
+                          f"(positional misalignment guard)")
+                    continue
+                for ts, row in g.iterrows():
+                    bar_step(sym, (row["Open"], row["High"], row["Low"], row["Close"],
+                                   row["Volume"], ts), st, "replay")
+            st["traded_today"] = any(dd["trades"] for dd in st["day"].values() if dd)
+            overlay_update(st, eod=True)
+            dp = sum(dd["day_realized"] for dd in st["day"].values() if dd)
+            nt = sum(dd["trades"] for dd in st["day"].values() if dd)
+            print(f"  {date}  trades {nt:2d}  day ${dp:+8.2f}  cum ${st['cum']:+9.2f}  "
+                  f"({st['cum'] / TARGET * 100:+5.0f}% of target)")
+            st["day"] = {}
+        flush_pending(st)
+        ap, ts_ = st["overlays"]["apex"], st["overlays"]["topstep"]
+        print(f"\n  replay totals: {st['n_trades']} closed trades over {n} sessions, "
+              f"cum ${st['cum']:+.2f}")
+        print(f"  Apex overlay: profit {st['cum'] - ap['base_cum']:+.0f}, floor {ap['floor']:+.0f}, "
+              f"tdays {ap['tdays']}, busted {ap['attempts'] - 1}x")
+        print(f"  Topstep overlay: profit {st['cum'] - ts_['base_cum']:+.0f}, floor {ts_['floor']:+.0f}, "
+              f"tdays {ts_['tdays']}, busted {ts_['attempts'] - 1}x")
+        print(f"\n(replay wrote ONLY to {rdir}; live journal/state untouched)")
+    finally:
+        set_paths(prev[0])
+        pending_clear()
+
+
+# ---------------- status mode ----------------
+
+def run_status():
+    if not os.path.exists(STATE_F):
+        print("No live state yet — run --live first.")
+        return
+    st = json.load(open(STATE_F))
+    migrate_state(st, datetime.now(ET).date().isoformat())   # display-only, never saved
+    eq, msgs = overlay_update(st, eod=False, write=False, date=st.get("today"))
+    print(f"PAPER STATUS (started {st['started'][:10]}): cum ${st['cum']:+.2f} across "
+          f"{st['n_trades']} closed trades / {st['n_entries']} entries, "
+          f"{st['trading_days']} trading days")
+    if st.get("halted_date"):
+        print(f"  DAILY STOP: {st['halted_reason']} (day {st['halted_date']}; resets next trading day)")
+    if st.get("cap_blocked_date"):
+        print(f"  DAILY PROFIT CAP: {st['cap_blocked_reason']} "
+              f"(day {st['cap_blocked_date']}; resets next trading day)")
+    print(f"  feed: {st.get('feed_status', {})}")
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            print(f"  {cfg['name']}: PASSED on {ov['passed_on']} "
+                  f"(fees ${ov['fees']:.0f}, attempts {ov['attempts']})")
+        else:
+            print(f"  {cfg['name']}: {st['cum'] - ov['base_cum']:+.0f}/{TARGET:.0f} to target, "
+                  f"floor {ov['floor']:+.0f}, {ov['tdays']} tdays, best day ${ov.get('best_day', 0.0):+.0f}, "
+                  f"fees ${ov['fees']:.0f}, attempts {ov['attempts']}")
+    for m in msgs:
+        print(f"  note: {m}")
+
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "--status"
+    if mode == "--live":
+        run_live()
+    elif mode == "--replay":
+        run_replay(int(sys.argv[2]) if len(sys.argv) > 2 else 5)
+    else:
+        run_status()

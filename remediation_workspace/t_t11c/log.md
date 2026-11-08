@@ -1,0 +1,2 @@
+- --- live run 2026-11-04T13:20:00-05:00 ---
+- `live` 11-04 13:20 ET **ES 2 micro SHORT opened** signal 20111.00 (12:00 bar) -> filled 20190.00 @ 13:20 (poll_quote, lag 20m; stop 20239.27, target 20028.89, sd 41.06, id 2026-11-04_ES_01)

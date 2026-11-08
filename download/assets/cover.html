@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;700;900&family=Playfair+Display:wght@400;700;900&display=swap" rel="stylesheet">
+<style>
+  @page { size: 794px 1123px; margin: 0; }
+  :root {
+    --page-bg: #f6f6f5;
+    --header-fill: #6f6340;
+    --border: #d2cdc0;
+    --icon: #9c8646;
+    --accent: #87702b;
+    --text-primary: #1d1d1b;
+    --text-muted: #8d8a83;
+    --c-bg: #f6f6f5;
+    --c-accent: #87702b;
+    --c-text: #1d1d1b;
+    --c-muted: #8d8a83;
+    --c-mid: #6f6340;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    width: 794px; height: 1123px;
+    background: var(--c-bg);
+    font-family: 'Inter', sans-serif;
+    color: var(--c-text);
+  }
+  @media screen {
+    html { height: auto; display: flex; justify-content: center; min-height: 100vh; background: var(--c-bg); }
+    body { transform-origin: top center; scale: min(1, calc(100vw / 794), calc(100vh / 1123)); margin: 0 auto; box-shadow: 0 0 60px rgba(0,0,0,0.15); }
+  }
+  .cover { width: 794px; height: 1123px; position: relative; border: none; outline: none; box-shadow: none; }
+
+  /* Layer 1: background grid (2% opacity) */
+  .layer-1 {
+    position: absolute; inset: 0; overflow: hidden; z-index: 1;
+    background-image:
+      linear-gradient(to right, rgba(135,112,43,0.05) 0.5px, transparent 0.5px),
+      linear-gradient(to bottom, rgba(135,112,43,0.05) 0.5px, transparent 0.5px);
+    background-size: 50px 50px;
+  }
+
+  /* Layer 2: structure - thick left anchor line */
+  .layer-2 { position: absolute; inset: 0; z-index: 2; }
+  .anchor-line {
+    position: absolute;
+    left: 95px;              /* 0.12 * W */
+    top: 112px;              /* 0.10 * H */
+    bottom: 112px;           /* to 0.90 * H */
+    width: 6px;
+    background: var(--c-mid);
+  }
+
+  /* Layer 3: content */
+  .layer-3 { position: absolute; inset: 0; z-index: 3; }
+  .kicker {
+    position: absolute; left: 185px; top: 168px;   /* 0.15 * H */
+    font-size: 15px; font-weight: 400; letter-spacing: 4px;
+    text-transform: uppercase; color: var(--c-accent); opacity: 0.75;
+  }
+  .hero {
+    position: absolute; left: 185px; top: 320px;   /* ~0.285 * H */
+    font-size: 62px; line-height: 1.15; font-weight: 900;
+    color: var(--c-text); max-width: 560px;
+    font-family: 'Playfair Display', 'Inter', serif;
+  }
+  .summary {
+    position: absolute; left: 185px; top: 575px;   /* ~0.51 * H */
+    font-size: 16px; line-height: 1.6; font-weight: 400;
+    color: var(--c-text); opacity: 0.85; max-width: 470px;  /* ~0.6 * W */
+  }
+  .meta {
+    position: absolute; left: 185px; top: 842px;   /* 0.75 * H */
+    font-size: 16px; line-height: 1.7; color: var(--c-muted);
+  }
+  .meta .strong { color: var(--c-text); font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="cover">
+    <div class="layer-1"></div>
+    <div class="layer-2"><div class="anchor-line"></div></div>
+    <div class="layer-3">
+      <div class="kicker">Quantitative Research Report &middot; MES / MNQ</div>
+      <div class="hero">Prop Evaluation<br>Bot Research</div>
+      <div class="summary">
+        Backtest and Monte Carlo evaluation of an automated VWAP-fade strategy
+        on micro E-mini futures, simulated against the 2026 rule sets of
+        Apex, Topstep, MyFundedFutures and Take Profit Trader. The report
+        answers three questions: trade win rate, time to the first
+        withdrawable payout, and all-in cost to get there.
+      </div>
+      <div class="meta">
+        <span class="strong">Prepared for:</span> NT8-Bridge Automated Futures Trading<br>
+        <span class="strong">Data:</span> Free continuous futures (Yahoo Finance), Jun 2024 - Nov 2026<br>
+        <span class="strong">Date:</span> November 4, 2026
+      </div>
+    </div>
+  </div>
+</body>
+</html>

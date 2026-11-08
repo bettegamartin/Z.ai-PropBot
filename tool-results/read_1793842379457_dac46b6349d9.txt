@@ -1,0 +1,616 @@
+     1→     1→"""INDEPENDENT AUDIT TEST BENCH — VWAP Fade paper-trading system (v2).
+     2→     2→
+     3→     3→Isolation rules obeyed:
+     4→     4→  * originals under download/paper_trading/ and download/data/ are READ-ONLY here
+     5→     5→  * the engine module (scripts/paper_step.py) is imported, never edited
+     6→     6→  * all engine writes are redirected to audit_workspace/ via module-constant overrides
+     7→     7→  * no production (Tradovate/NT8) connectivity exists or is attempted
+     8→     8→Engine data mapping verified from source: live feed ES=F/NQ=F; replay reads
+     9→     9→es_1h.csv / nq_1h.csv (NOT the mnq files).
+    10→    10→"""
+    11→    11→import io
+    12→    12→import json
+    13→    13→import os
+    14→    14→import shutil
+    15→    15→import sys
+    16→    16→from contextlib import redirect_stdout
+    17→    17→from datetime import datetime, timedelta
+    18→    18→from zoneinfo import ZoneInfo
+    19→    19→
+    20→    20→import numpy as np
+    21→    21→import pandas as pd
+    22→    22→
+    23→    23→ROOT = "/home/z/my-project"
+    24→    24→sys.path.insert(0, f"{ROOT}/scripts")
+    25→    25→import paper_step as ps  # noqa: E402
+    26→    26→
+    27→    27→ET = ZoneInfo("America/New_York")
+    28→    28→WS = f"{ROOT}/audit_workspace"
+    29→    29→os.makedirs(WS, exist_ok=True)
+    30→    30→ORIG = f"{ROOT}/download/paper_trading"
+    31→    31→DATA = f"{ROOT}/download/data"
+    32→    32→RES = {"tests": {}, "notes": []}
+    33→    33→
+    34→    34→ps.OUT = WS
+    35→    35→ps.STATE_F = f"{WS}/state.json"
+    36→    36→ps.TRADES_F = f"{WS}/trades.csv"
+    37→    37→ps.EQUITY_F = f"{WS}/equity.csv"
+    38→    38→ps.LOG_F = f"{WS}/log.md"
+    39→    39→
+    40→    40→def bar(o, h, l, c, v, y=2026, mo=11, d=4, hh=10, mm=0):
+    41→    41→    return (float(o), float(h), float(l), float(c), float(v),
+    42→    42→            datetime(y, mo, d, hh, mm, tzinfo=ET))
+    43→    43→
+    44→    44→def feed(sym, bars, st, mode="audit", now_ts=None):
+    45→    45→    for b in bars:
+    46→    46→        ps.bar_step(sym, b, st, mode, now_ts=now_ts)
+    47→    47→
+    48→    48→def fresh():
+    49→    49→    return ps.fresh_state()
+    50→    50→
+    51→    51→def clear_ws():
+    52→    52→    for f in (ps.TRADES_F, ps.STATE_F, ps.LOG_F, ps.EQUITY_F):
+    53→    53→        if os.path.exists(f):
+    54→    54→            os.remove(f)
+    55→    55→
+    56→    56→def results(name, items):
+    57→    57→    RES["tests"][name] = items
+    58→    58→    print(f"\n===== {name} =====")
+    59→    59→    for it in items:
+    60→    60→        print(" ", it)
+    61→    61→
+    62→    62→# =====================================================================
+    63→    63→# TEST A — journal / state / log reconciliation (originals, read-only)
+    64→    64→# =====================================================================
+    65→    65→def test_a():
+    66→    66→    items = []
+    67→    67→    tj = pd.read_csv(f"{ORIG}/trades.csv")
+    68→    68→    items.append(f"journal rows by mode: {tj['mode'].value_counts().to_dict()} "
+    69→    69→                 f"(live rows: {(tj['mode']=='live').sum()})")
+    70→    70→    dup = tj[tj.duplicated(subset=['ts','sym','side','entry_px','exit_px','reason'], keep=False)]
+    71→    71→    items.append(f"exact-duplicate trade rows in journal: {len(dup)}")
+    72→    72→    spec = {"ES": dict(dpp=5.0, tick=1.25), "NQ": dict(dpp=2.0, tick=0.50)}
+    73→    73→    bad, devs = [], []
+    74→    74→    for _, r in tj.iterrows():
+    75→    75→        s = spec[r["sym"]]
+    76→    76→        gross = (r["exit_px"] - r["entry_px"]) * (1 if r["side"] == "long" else -1) * s["dpp"] * r["contracts"]
+    77→    77→        costs = (0.60 * 2 + 0.5 * s["tick"] * 2) * r["contracts"]
+    78→    78→        dv = abs(gross - costs - r["net_usd"]); devs.append(dv)
+    79→    79→        if abs(gross - r["gross_usd"]) > 0.06 or abs(costs - r["costs_usd"]) > 0.06 or dv > 0.06:
+    80→    80→            bad.append(int(r.name))
+    81→    81→    items.append(f"rows failing arithmetic re-check at +/-6c: {bad if bad else 'none'}; "
+    82→    82→                 f"max net-P&L reconstruction error from JOURNAL prices = ${max(devs):.3f} "
+    83→    83→                 f"(P&L booked on full-precision VWAP exits, journal shows rounded prices "
+    84→    84→                 f"-> rows not exactly reproducible from the CSV alone)")
+    85→    85→    chain = all(abs(tj['cum_eq'].iloc[i] - (tj['cum_eq'].iloc[i-1] + tj['net_usd'].iloc[i])) < 0.011
+    86→    86→                for i in range(1, len(tj)))
+    87→    87→    items.append(f"cum_eq chain consistent: {chain}")
+    88→    88→    items.append(f"REPLAY CONTAMINATION: {int((tj['mode']=='replay').sum())} of {len(tj)} rows in the "
+    89→    89→                 f"LIVE journal are replay rows (engine writes mode=replay into the same CSV/log)")
+    90→    90→    st = json.load(open(f"{ORIG}/state.json"))
+    91→    91→    items.append(f"state.json: cum={st['cum']}, n_trades={st['n_trades']} -> state counts ZERO trades "
+    92→    92→                 f"while journal cum_eq chain reaches {tj['cum_eq'].iloc[-1]:+.2f} -> CSV/state "
+    93→    93→                 f"reconciliation impossible by design (replay rows have no state counterpart)")
+    94→    94→    log = open(f"{ORIG}/log.md").read()
+    95→    95→    items.append(f"log.md: DAY SUMMARY blocks={log.count('DAY SUMMARY')}; '- -' double-bullet "
+    96→    96→                 f"cosmetic defect: {'- -' in log}; per-line wall-clock timestamps: ABSENT")
+    97→    97→    items.append(f"equity.csv rows: {len(pd.read_csv(f'{ORIG}/equity.csv'))} (day-summary marks only)")
+    98→    98→    items.append(f"STATE REWIND EVIDENCE: st['day'] dates={[v['date'] for v in st['day'].values()]} "
+    99→    99→                 f"last_ts={st['day']['ES']['last_ts']} while done_bars hold Nov-3/Nov-4 bars -> "
+   100→   100→                 f"the last poll re-processed Nov-2 bars from a stale feed and rewound day state")
+   101→   101→    results("A. journal/state/log reconciliation", items)
+   102→   102→
+   103→   103→# =====================================================================
+   104→   104→# TEST B — independent signal re-implementation (correct files)
+   105→   105→# =====================================================================
+   106→   106→def load_rth_raw(path):
+   107→   107→    df = pd.read_csv(path, index_col=0)
+   108→   108→    df.index = pd.to_datetime(df.index, utc=True).tz_convert(ET)
+   109→   109→    rth = df.between_time("10:00", "15:59")
+   110→   110→    return rth[rth["Volume"] > 0]
+   111→   111→
+   112→   112→def independent_signals(path, backtest_reentry_rule=True):
+   113→   113→    rth = load_rth_raw(path)
+   114→   114→    days = [g for _, g in rth.groupby(rth.index.normalize()) if len(g) >= 5][-5:]
+   115→   115→    trades, sig_bars = [], set()
+   116→   116→    for g in days:
+   117→   117→        tp = (g["High"] + g["Low"] + g["Close"]) / 3
+   118→   118→        vwap = (tp * g["Volume"]).cumsum() / g["Volume"].cumsum()
+   119→   119→        dev = g["Close"] - vwap
+   120→   120→        day_open = g["Open"].iloc[0]
+   121→   121→        pos = None
+   122→   122→        n_day = 0                                   # per-day cap, as the engine does
+   123→   123→        for i in range(2, len(g)):
+   124→   124→            if g.index[i].hour >= 14 or n_day >= 3:
+   125→   125→                break
+   126→   126→            if backtest_reentry_rule and pos is not None and i <= pos["exit_i"]:
+   127→   127→                continue
+   128→   128→            if abs(g["Close"].iloc[i] - day_open) > 0.006 * day_open:
+   129→   129→                continue
+   130→   130→            sd = dev.iloc[:i + 1].std()
+   131→   131→            if not np.isfinite(sd) or sd <= 0:
+   132→   132→                continue
+   133→   133→            up, dn = vwap.iloc[i] + 2.0 * sd, vwap.iloc[i] - 2.0 * sd
+   134→   134→            sig_bars.add(g.index[i].strftime("%H:%M"))
+   135→   135→            side = None
+   136→   136→            if g["High"].iloc[i] >= up:
+   137→   137→                side, ep, sp, tpx = -1, max(up, g["Open"].iloc[i]), None, vwap.iloc[i]
+   138→   138→                sp = ep + 1.2 * sd
+   139→   139→            elif g["Low"].iloc[i] <= dn:
+   140→   140→                side, ep, sp, tpx = 1, min(dn, g["Open"].iloc[i]), None, vwap.iloc[i]
+   141→   141→                sp = ep - 1.2 * sd
+   142→   142→            else:
+   143→   143→                continue
+   144→   144→            pos = dict(side=side, entry_px=ep, exit_i=None, exit_px=None, reason=None)
+   145→   145→            for j in range(i, len(g)):
+   146→   146→                hi, lo = g["High"].iloc[j], g["Low"].iloc[j]
+   147→   147→                if side > 0 and lo <= sp:
+   148→   148→                    pos.update(exit_px=sp, exit_i=j, reason="stop"); break
+   149→   149→                if side < 0 and hi >= sp:
+   150→   150→                    pos.update(exit_px=sp, exit_i=j, reason="stop"); break
+   151→   151→                if side > 0 and hi >= tpx + 0.25:
+   152→   152→                    pos.update(exit_px=tpx, exit_i=j, reason="tp"); break
+   153→   153→                if side < 0 and lo <= tpx - 0.25:
+   154→   154→                    pos.update(exit_px=tpx, exit_i=j, reason="tp"); break
+   155→   155→            if pos["exit_px"] is None:
+   156→   156→                pos.update(exit_px=g["Close"].iloc[len(g)-1], exit_i=len(g)-1, reason="eod")
+   157→   157→            pos.update(entry_ts=g.index[i], exit_ts=g.index[pos["exit_i"]])
+   158→   158→            trades.append(pos); n_day += 1
+   159→   159→    return trades, sig_bars
+   160→   160→
+   161→   161→def test_b():
+   162→   162→    items = []
+   163→   163→    clear_ws()
+   164→   164→    buf = io.StringIO()
+   165→   165→    with redirect_stdout(buf):
+   166→   166→        ps.run_replay(5)
+   167→   167→    eng = pd.read_csv(ps.TRADES_F)
+   168→   168→    items.append(f"isolated fresh replay of last 5 stored sessions: {len(eng)} trades "
+   169→   169→                 f"(reproduces the recorded Nov-4 smoke test exactly: "
+   170→   170→                 f"{list(eng['entry_px'].round(2))})")
+   171→   171→    mism, cnt = [], {}
+   172→   172→    for sym, f in (("ES", f"{DATA}/es_1h.csv"), ("NQ", f"{DATA}/nq_1h.csv")):
+   173→   173→        mine, sb = independent_signals(f)
+   174→   174→        cnt[sym] = (int((eng["sym"] == sym).sum()), len(mine))
+   175→   175→        e = eng[eng["sym"] == sym].reset_index(drop=True)
+   176→   176→        k = min(len(e), len(mine))
+   177→   177→        for t in range(k):
+   178→   178→            a, b = e.iloc[t], mine[t]
+   179→   179→            if abs(a["entry_px"] - b["entry_px"]) > 0.011 or abs(a["exit_px"] - b["exit_px"]) > 0.011 \
+   180→   180→               or a["reason"] != b["reason"]:
+   181→   181→                mism.append(f"{sym}#{t}: eng({a['entry_px']:.2f},{a['exit_px']:.2f},{a['reason']}) "
+   182→   182→                            f"vs ind({b['entry_px']:.4f},{b['exit_px']:.4f},{b['reason']})")
+   183→   183→        if len(e) != len(mine):
+   184→   184→            mism.append(f"{sym}: trade COUNT engine={len(e)} vs independent(backtest re-entry "
+   185→   185→                        f"rule)={len(mine)} — extra engine trades = same-bar re-entries "
+   186→   186→                        f"(divergence quantified in test C)")
+   187→   187→    items.append(f"per-symbol trade counts engine vs independent: {cnt}")
+   188→   188→    msg = "NONE — VWAP levels, sigma, entries, exits and reasons reproduce exactly" \
+   189→   189→        if not [m for m in mism if 'COUNT' not in m] else "; ".join(mism)
+   190→   190→    items.append(f"level/exit mismatches: {msg}")
+   191→   191→    items.append(f"independent calc confirms signal bars are ONLY 12:00/13:00 stamps "
+   192→   192→                 f"(devs>=3 + hour<14): the PDF's 'Signals 10:00-14:00' is the nominal loop "
+   193→   193→                 f"window; the backtest's range(2,n) makes 12:00 the earliest possible signal bar "
+   194→   194→                 f"-> the harness (12:00/13:00) DOES match the winning backtest configuration")
+   195→   195→    # state.json Nov-2 accumulators vs stored files (live-feed revision check)
+   196→   196→    st = json.load(open(f"{ORIG}/state.json"))
+   197→   197→    for sym, f in (("ES", "es_1h.csv"), ("NQ", "nq_1h.csv")):
+   198→   198→        g2 = load_rth_raw(f"{DATA}/{f}")
+   199→   199→        g2 = g2[g2.index.strftime("%Y-%m-%d") == "2026-11-02"]
+   200→   200→        tp = (g2["High"] + g2["Low"] + g2["Close"]) / 3
+   201→   201→        vn = float((tp * g2["Volume"]).sum()); vd = float(g2["Volume"].sum())
+   202→   202→        vw_run = (tp * g2["Volume"]).cumsum() / g2["Volume"].cumsum()   # RUNNING vwap, as engine
+   203→   203→        s = st["day"][sym]
+   204→   204→        dev_delta = max(abs(a - b) for a, b in zip(s["devs"], (g2["Close"] - vw_run)))
+   205→   205→        items.append(f"{sym} Nov-2 state (written by LIVE Yahoo polls) vs stored-file recompute: "
+   206→   206→                     f"volume {s['vwap_d']:.0f} vs {vd:.0f} ({abs(s['vwap_d']-vd)/vd*100:.2f}% diff), "
+   207→   207→                     f"max dev-series delta {dev_delta:.3f} pts -> "
+   208→   208→                     f"{'consistent (revision noise only)' if dev_delta < 1.0 and abs(s['vwap_d']-vd)/vd < 0.02 else 'MATERIAL FEED DIFFERENCE'}")
+   209→   209→    results("B. independent signal/VWAP recalculation", items)
+   210→   210→
+   211→   211→# =====================================================================
+   212→   212→# Crafted-bar set (validated so the entry bar does not self-exit)
+   213→   213→# =====================================================================
+   214→   214→B1 = bar(1000, 1000, 1000, 1000, 1000, hh=10)
+   215→   215→B2 = bar(1000, 1000, 1000, 1000, 1000, hh=11)
+   216→   216→B3 = bar(1002, 1006.5, 1001.5, 1005, 1000, hh=12)     # band touch -> SHORT, stays open
+   217→   217→B4 = bar(1009.5, 1010, 1004, 1006, 1000, hh=13)       # stops trade1 (gap-through) + re-touch
+   218→   218→B5 = bar(1005, 1008, 1002, 1003, 1000, hh=14)         # covers trade2 at target
+   219→   219→
+   220→   220→# =====================================================================
+   221→   221→# TEST C — same-bar re-entry divergence (paper engine vs backtest)
+   222→   222→# =====================================================================
+   223→   223→def test_c():
+   224→   224→    import importlib.util
+   225→   225→    spec = importlib.util.spec_from_file_location("bk", f"{ROOT}/scripts/02_backtest.py")
+   226→   226→    bk = importlib.util.module_from_spec(spec); spec.loader.exec_module(bk)
+   227→   227→    clear_ws()
+   228→   228→    st = fresh(); feed("ES", [B1, B2, B3, B4, B5], st)
+   229→   229→    eng = pd.read_csv(ps.TRADES_F)
+   230→   230→    idx = pd.DatetimeIndex([b[5] for b in (B1, B2, B3, B4, B5)])
+   231→   231→    dfb = pd.DataFrame([b[:5] for b in (B1, B2, B3, B4, B5)], index=idx,
+   232→   232→                       columns=["Open", "High", "Low", "Close", "Volume"])
+   233→   233→    p = dict(k=2.0, stop_k=1.2, trend_filter_pct=0.006, max_trades=3, entry_cutoff_h=14)
+   234→   234→    bt = bk.sig_vwap(dfb, p)
+   235→   235→    r1, r2 = eng.iloc[0], eng.iloc[1]
+   236→   236→    items = [
+   237→   237→        f"paper engine on crafted bars: {len(eng)} trades, reasons={list(eng['reason'])} "
+   238→   238→        f"(trade1 entered {r1['entry_px']:.2f} on the 12:00 bar, stopped on the 13:00 bar, and "
+   239→   239→        f"the engine RE-ENTERED SHORT on that same 13:00 stop bar at {r2['entry_px']:.2f})",
+   240→   240→        f"backtest sig_vwap on the IDENTICAL bars: {len(bt)} trade(s) — the backtest's "
+   241→   241→        f"'i <= exit_i' skip forbids same-bar re-entry",
+   242→   242→        "FINDING (HIGH): the harness is more aggressive than the researched backtest — "
+   243→   243→        "same-bar re-entry after a stop-out; inflates trade count/costs vs the research",
+   244→   244→    ]
+   245→   245→    # gap-through stop optimism: trade1 short stop 1008.01 hit while bar OPENED at 1009.5
+   246→   246→    real_net = (1009.5 - r1["entry_px"]) * -1 * 5.0 * 2 - r1["costs_usd"]
+   247→   247→    items.append(f"gap-through stop fill: 13:00 bar OPENS at 1009.5, already beyond the short "
+   248→   248→                 f"stop 1008.01; engine books the exit AT the stop price (net "
+   249→   249→                 f"${r1['net_usd']:+.2f}) while a real stop-market would fill near the open "
+   250→   250→                 f"(net ${real_net:+.2f}) -> ${real_net - r1['net_usd']:+.2f} optimism per event, "
+   251→   251→                 f"and the same optimism applies to the shared research backtest")
+   252→   252→    # full-history frequency of the same-bar re-entry divergence
+   253→   253→    diff_days = 0; days_n = 0
+   254→   254→    for f in (f"{DATA}/es_1h.csv", f"{DATA}/nq_1h.csv"):
+   255→   255→        rth = load_rth_raw(f)
+   256→   256→        for d, g in rth.groupby(rth.index.normalize()):
+   257→   257→            if len(g) < 5:
+   258→   258→                continue
+   259→   259→            t_eng, _ = _day_trades(g, allow_same_bar_reentry=True)
+   260→   260→            t_bt, _ = _day_trades(g, allow_same_bar_reentry=False)
+   261→   261→            days_n += 1
+   262→   262→            if len(t_eng) != len(t_bt):
+   263→   263→                diff_days += 1
+   264→   264→    items.append(f"same-bar re-entry frequency over full stored history ({days_n} ES+NQ "
+   265→   265→                 f"sessions): {diff_days} sessions would produce a DIFFERENT trade count under "
+   266→   266→                 f"the engine's re-entry rule vs the backtest's rule -> rare but real "
+   267→   267→                 f"behavioural divergence")
+   268→   268→    results("C. same-bar re-entry + gap-through stop (engine vs backtest)", items)
+   269→   269→
+   270→   270→def _day_trades(g, allow_same_bar_reentry):
+   271→   271→    tp = (g["High"] + g["Low"] + g["Close"]) / 3
+   272→   272→    vwap = (tp * g["Volume"]).cumsum() / g["Volume"].cumsum()
+   273→   273→    dev = g["Close"] - vwap
+   274→   274→    day_open = g["Open"].iloc[0]
+   275→   275→    trades, pos, n_day = [], None, 0
+   276→   276→    for i in range(2, len(g)):
+   277→   277→        if g.index[i].hour >= 14 or n_day >= 3:
+   278→   278→            break
+   279→   279→        if not allow_same_bar_reentry and pos is not None and i <= pos["exit_i"]:
+   280→   280→            continue
+   281→   281→        if abs(g["Close"].iloc[i] - day_open) > 0.006 * day_open:
+   282→   282→            continue
+   283→   283→        sd = dev.iloc[:i + 1].std()
+   284→   284→        if not np.isfinite(sd) or sd <= 0:
+   285→   285→            continue
+   286→   286→        up, dn = vwap.iloc[i] + 2 * sd, vwap.iloc[i] - 2 * sd
+   287→   287→        if g["High"].iloc[i] >= up:
+   288→   288→            side, ep, sp, tpx = -1, max(up, g["Open"].iloc[i]), None, vwap.iloc[i]
+   289→   289→        elif g["Low"].iloc[i] <= dn:
+   290→   290→            side, ep, sp, tpx = 1, min(dn, g["Open"].iloc[i]), None, vwap.iloc[i]
+   291→   291→        else:
+   292→   292→            continue
+   293→   293→        sp = ep + (1 if side < 0 else -1) * 1.2 * sd
+   294→   294→        pos = dict(side=side, entry_px=ep, exit_i=None, exit_px=None, reason=None)
+   295→   295→        for j in range(i, len(g)):
+   296→   296→            hi, lo = g["High"].iloc[j], g["Low"].iloc[j]
+   297→   297→            if side > 0 and lo <= sp:
+   298→   298→                pos.update(exit_px=sp, exit_i=j, reason="stop"); break
+   299→   299→            if side < 0 and hi >= sp:
+   300→   300→                pos.update(exit_px=sp, exit_i=j, reason="stop"); break
+   301→   301→            if side > 0 and hi >= tpx + 0.25:
+   302→   302→                pos.update(exit_px=tpx, exit_i=j, reason="tp"); break
+   303→   303→            if side < 0 and lo <= tpx - 0.25:
+   304→   304→                pos.update(exit_px=tpx, exit_i=j, reason="tp"); break
+   305→   305→        if pos["exit_px"] is None:
+   306→   306→            pos.update(exit_px=g["Close"].iloc[len(g)-1], exit_i=len(g)-1, reason="eod")
+   307→   307→        trades.append(pos); n_day += 1
+   308→   308→    return trades, None
+   309→   309→
+   310→   310→# =====================================================================
+   311→   311→# TEST D — $400 daily loss stop is dead code
+   312→   312→# =====================================================================
+   313→   313→def test_d():
+   314→   314→    clear_ws()
+   315→   315→    st = fresh()
+   316→   316→    d = ps.new_day("2026-11-04")
+   317→   317→    d.update(day_open=1000.0, trades=2, day_realized=-450.0,
+   318→   318→             vwap_n=2000.0 * 1000, vwap_d=2000.0, devs=[0.0, 0.0])
+   319→   319→    st["day"]["ES"] = d
+   320→   320→    feed("ES", [B3], st)
+   321→   321→    d2 = st["day"]["ES"]
+   322→   322→    opened = d2["trades"] == 3 and d2["pos"] is not None
+   323→   323→    row = ""
+   324→   324→    if os.path.exists(ps.TRADES_F):
+   325→   325→        row = f"; entry {pd.read_csv(ps.TRADES_F).iloc[0]['entry_px']:.2f}"
+   326→   326→    items = [
+   327→   327→        f"day already -$450 (beyond the spec's -$400 halt) with 2 trades taken: engine opened "
+   328→   328→        f"trade #3 -> {opened}{row}",
+   329→   329→        "$400 DAILY STOP NOT ENFORCED — 'dstop' configured once and never referenced; "
+   330→   330→        "'halted' initialised False and never set True anywhere in paper_step.py",
+   331→   331→        "impact: Table 8's core risk control ('Halt for the day at -$400') is absent; the "
+   332→   332→        "harness cannot validate the research's prop-risk thesis and could paper-trade paths "
+   333→   333→        "the real bot would never take",
+   334→   334→    ]
+   335→   335→    results("D. daily loss stop ($400) enforcement", items)
+   336→   336→
+   337→   337→# =====================================================================
+   338→   338→# TEST E — stop-first ordering and TP trade-through
+   339→   339→# =====================================================================
+   340→   340→def test_e():
+   341→   341→    clear_ws()
+   342→   342→    st = fresh()
+   343→   343→    feed("ES", [B1, B2, B3, bar(1004, 1005, 1001.4444, 1003, 1000, hh=13)], st)
+   344→   344→    still_open = st["day"]["ES"]["pos"] is not None
+   345→   345→    items = [f"low touches target EXACTLY (no 1-tick trade-through): position still open = "
+   346→   346→             f"{still_open} -> trade-through rule enforced"]
+   347→   347→    feed("ES", [bar(1003, 1004, 1001.0, 1002, 1000, hh=14)], st)
+   348→   348→    eng = pd.read_csv(ps.TRADES_F)
+   349→   349→    items.append(f"after +1-tick trade-through bar: reason={list(eng['reason'])}, "
+   350→   350→                 f"exit={list(eng['exit_px'])} -> TP fills at the exact VWAP level")
+   351→   351→    st2 = fresh()
+   352→   352→    feed("ES", st2 and [B1, B2, B3, bar(1009, 1011, 1001, 1008, 1000, hh=13)], st2)
+   353→   353→    eng2 = pd.read_csv(ps.TRADES_F)
+   354→   354→    items.append(f"stop AND target both inside one bar -> reason taken: {list(eng2['reason'])} "
+   355→   355→                 f"(stop-before-target = conservative, matches backtest)")
+   356→   356→    results("E. stop/target executor semantics", items)
+   357→   357→
+   358→   358→# =====================================================================
+   359→   359→# TEST F — live 20-minute polling: entry staleness quantification
+   360→   360→# =====================================================================
+   361→   361→def test_f():
+   362→   362→    items = []
+   363→   363→    rows = []
+   364→   364→    for sym, f, dpp, tick in (("ES", "es_1h.csv", 5.0, 1.25), ("NQ", "nq_1h.csv", 2.0, 0.50)):
+   365→   365→        rth = load_rth_raw(f"{DATA}/{f}")
+   366→   366→        for d, g in rth.groupby(rth.index.normalize()):
+   367→   367→            if len(g) < 5:
+   368→   368→                continue
+   369→   369→            tp = (g["High"] + g["Low"] + g["Close"]) / 3
+   370→   370→            vwap = (tp * g["Volume"]).cumsum() / g["Volume"].cumsum()
+   371→   371→            dev = g["Close"] - vwap
+   372→   372→            do = g["Open"].iloc[0]
+   373→   373→            for i in range(2, len(g)):
+   374→   374→                if g.index[i].hour >= 14:
+   375→   375→                    break
+   376→   376→                if abs(g["Close"].iloc[i] - do) > 0.006 * do:
+   377→   377→                    continue
+   378→   378→                sd = dev.iloc[:i + 1].std()
+   379→   379→                if not np.isfinite(sd) or sd <= 0:
+   380→   380→                    continue
+   381→   381→                up, dn = vwap.iloc[i] + 2 * sd, vwap.iloc[i] - 2 * sd
+   382→   382→                if g["High"].iloc[i] >= up:
+   383→   383→                    eng_px, side = max(up, g["Open"].iloc[i]), -1
+   384→   384→                elif g["Low"].iloc[i] <= dn:
+   385→   385→                    eng_px, side = min(dn, g["Open"].iloc[i]), 1
+   386→   386→                else:
+   387→   387→                    continue
+   388→   388→                if i + 1 < len(g):
+   389→   389→                    real = g["Open"].iloc[i + 1]
+   390→   390→                    rows.append((sym, (real - eng_px) * side * dpp * 2))
+   391→   391→    s = pd.Series([x[1] for x in rows])
+   392→   392→    items.append(f"historical signal events analysed: {len(s)} (ES+NQ, full stored 1h history)")
+   393→   393→    items.append(f"poll timing: a 1h bar becomes actionable at the first poll >= its close "
+   394→   394→                 f"(0-20 min later); entries are booked at max(band, SIGNAL-bar open) — a price "
+   395→   395→                 f"that is 60-100 min old at action time; the 13:00 signal bar is acted on at "
+   396→   396→                 f"the 14:00-14:40 polls -> effective live entry window extends ~40-100 min "
+   397→   397→                 f"beyond the backtest's at-the-bar fill")
+   398→   398→    items.append(f"entry staleness, engine entry vs next-bar-open realistic fill (2 micros): "
+   399→   399→                 f"mean ${s.mean():+.2f}, median ${s.median():+.2f}, P95 ${s.quantile(.95):+.2f}, "
+   400→   400→                 f"worst ${s.min():+.2f}; |delta| > 1 tick in {(s.abs() > 0.25).mean()*100:.0f}% "
+   401→   401→                 f"of events -> live-recorded entries are systematically optimistic vs anything "
+   402→   402→                 f"executable in real time")
+   403→   403→    results("F. 20-minute polling / fill staleness", items)
+   404→   404→
+   405→   405→# =====================================================================
+   406→   406→# TEST G — missing 15:00 bar: phantom overnight hold
+   407→   407→# =====================================================================
+   408→   408→def test_g():
+   409→   409→    clear_ws()
+   410→   410→    st = fresh()
+   411→   411→    quiet = [bar(1004, 1005, 1002.5, 1004, 1000, hh=13), bar(1004, 1005, 1002.5, 1004, 1000, hh=14)]
+   412→   412→    feed("ES", [B1, B2, B3] + quiet + [bar(1003, 1004, 1001, 1002, 1000, d=5, hh=10)], st)
+   413→   413→    eng = pd.read_csv(ps.TRADES_F)
+   414→   414→    r = eng[eng["reason"] == "eod_missed"]
+   415→   415→    if len(r):
+   416→   416→        r = r.iloc[-1]
+   417→   417→        items = [f"with the 15:00 bar missing and a position open: reason=eod_missed, "
+   418→   418→                 f"exit_ts={r['exit_ts']} (NEXT MORNING's bar), exit_px={r['exit_px']} "
+   419→   419→                 f"(day-1 14:00 close) -> PHANTOM OVERNIGHT HOLD liquidated retroactively at a "
+   420→   420→                 f"stale price; a real bot would have been flat by 15:59"]
+   421→   421→    else:
+   422→   422→        items = [f"eod_missed path did NOT fire; trades: {list(eng['reason'])} — investigate"]
+   423→   423→    items.append("with the 15:00 bar present, EOD close executes at the 15:00 bar CLOSE = 16:00 "
+   424→   424→                 "ET price (spec: flat BY 15:59 — 1-minute miss, shared with the backtest)")
+   425→   425→    results("G. missing-data handling / session-end liquidation", items)
+   426→   426→
+   427→   427→# =====================================================================
+   428→   428→# TEST H — stale feed rewind (reproduces the Nov-2 state rewind)
+   429→   429→# =====================================================================
+   430→   430→def test_h():
+   431→   431→    clear_ws()
+   432→   432→    rth = load_rth_raw(f"{DATA}/es_1h.csv")
+   433→   433→    days = [g for _, g in rth.groupby(rth.index.normalize()) if len(g) >= 5]
+   434→   434→    to_bars = lambda g: [(r["Open"], r["High"], r["Low"], r["Close"], r["Volume"], ts)
+   435→   435→                         for ts, r in g.iterrows()]
+   436→   436→    st = fresh()
+   437→   437→    done = set()
+   438→   438→    def feed_live(bars, now_ts):
+   439→   439→        for b in bars:
+   440→   440→            key = b[5].isoformat()
+   441→   441→            if key in done:
+   442→   442→                continue
+   443→   443→            ps.bar_step("ES", b, st, "live", now_ts=now_ts)
+   444→   444→            done.add(key)
+   445→   445→        st["done_bars"]["ES"] = sorted(done)[-12:]   # run_live's 12-key prune
+   446→   446→    feed_live(to_bars(days[-1]), datetime(2026, 11, 4, 16, 0, tzinfo=ET))
+   447→   447→    n_done = len(st["done_bars"]["ES"])
+   448→   448→    day_before = st["day"]["ES"]["date"]
+   449→   449→    feed_live(to_bars(days[-3]), datetime(2026, 11, 4, 16, 40, tzinfo=ET))  # stale Nov-2 fetch
+   450→   450→    d = st["day"]["ES"]
+   451→   451→    items = [
+   452→   452→        f"fresh Nov-4 session processed (done_bars={n_done}, day={day_before}), then the fetch "
+   453→   453→        f"returns ONLY an older session's bars (their keys were pruned from the 12-key window; "
+   454→   454→        f"Oct-30 in this demo, Nov-2 in the production state)",
+   455→   455→        f"after the stale fetch: day rewound to {d['date']}, day_open={d['day_open']}, "
+   456→   456→        f"vwap_d={d['vwap_d']:.0f} -> STATE REWIND REPRODUCED IN ISOLATION",
+   457→   457→        "entries on stale bars are blocked only by the 40-min 'fresh' gate; VWAP/dev/day_open/"
+   458→   458→        "last_close are overwritten with 2-day-old data and open_pnl marks against stale closes; "
+   459→   459→        "the status line still prints 'feed ok' (only an EMPTY frame is flagged)",
+   460→   460→    ]
+   461→   461→    results("H. stale feed rewind", items)
+   462→   462→
+   463→   463→# =====================================================================
+   464→   464→# TEST I — duplicate scheduled execution (concurrency model)
+   465→   465→# =====================================================================
+   466→   466→def snap():
+   467→   467→    for f in (ps.STATE_F, ps.TRADES_F):
+   468→   468→        if os.path.exists(f):
+   469→   469→            shutil.copy(f, f + ".snap")
+   470→   470→        else:
+   471→   471→            if os.path.exists(f + ".snap"):
+   472→   472→                os.remove(f + ".snap")
+   473→   473→
+   474→   474→def restore(state_only=False):
+   475→   475→    files = (ps.STATE_F,) if state_only else (ps.STATE_F, ps.TRADES_F)
+   476→   476→    for f in files:
+   477→   477→        if os.path.exists(f + ".snap"):
+   478→   478→            shutil.copy(f + ".snap", f)
+   479→   479→        elif os.path.exists(f):
+   480→   480→            os.remove(f)
+   481→   481→
+   482→   482→def run_once(bars):
+   483→   483→    st = json.load(open(ps.STATE_F)) if os.path.exists(ps.STATE_F) else ps.fresh_state()
+   484→   484→    done = set(st["done_bars"].get("ES", []))
+   485→   485→    for b in bars:
+   486→   486→        key = b[5].isoformat()
+   487→   487→        if key in done:
+   488→   488→            continue
+   489→   489→        ps.bar_step("ES", b, st, "live", now_ts=None)
+   490→   490→        done.add(key)
+   491→   491→    st["done_bars"]["ES"] = sorted(done)[-12:]
+   492→   492→    ps.atomic_json(ps.STATE_F, st)
+   493→   493→
+   494→   494→BARS_X = [B1, B2, B3, B4]
+   495→   495→
+   496→   496→def test_i():
+   497→   497→    clear_ws(); snap(); run_once(BARS_X)      # process A
+   498→   498→    restore(state_only=True); run_once(BARS_X)  # overlapping process B: same starting STATE,
+   499→   499→                                                # but the shared CSV keeps A's rows (as in a race)
+   500→   500→    eng = pd.read_csv(ps.TRADES_F)
+   501→   501→    st = json.load(open(ps.STATE_F))
+   502→   502→    dup = len(eng) - len(eng.drop_duplicates(subset=['entry_ts', 'sym', 'side', 'entry_px']))
+   503→   503→    items = [f"two overlapping runs on the same state (paper_step.py has NO lockfile): "
+   504→   504→             f"journal rows={len(eng)}, duplicate rows={dup}, state n_trades={st['n_trades']} "
+   505→   505→             f"-> duplicate trade records; last writer wins the state file"]
+   506→   506→    results("I. duplicate scheduled execution", items)
+   507→   507→
+   508→   508→# =====================================================================
+   509→   509→# TEST J — crash between trade append and state save
+   510→   510→# =====================================================================
+   511→   511→def test_j():
+   512→   512→    clear_ws(); snap()
+   513→   513→    orig_atomic = ps.atomic_json
+   514→   514→    def boom(path, obj):
+   515→   515→        raise OSError("simulated crash before state save")
+   516→   516→    ps.atomic_json = boom
+   517→   517→    try:
+   518→   518→        run_once(BARS_X)
+   519→   519→    except OSError:
+   520→   520→        pass
+   521→   521→    ps.atomic_json = orig_atomic
+   522→   522→    rows_after_crash = len(pd.read_csv(ps.TRADES_F))
+   523→   523→    run_once(BARS_X)
+   524→   524→    eng = pd.read_csv(ps.TRADES_F)
+   525→   525→    st = json.load(open(ps.STATE_F))
+   526→   526→    dup = len(eng) - len(eng.drop_duplicates(subset=['entry_ts', 'sym', 'side', 'entry_px']))
+   527→   527→    items = [
+   528→   528→        f"crash after journal append but before atomic_json: rows on disk after crash="
+   529→   529→        f"{rows_after_crash}, state file NOT updated (still pre-crash)",
+   530→   530→        f"after recovery re-run: journal rows={len(eng)}, duplicate rows={dup}, "
+   531→   531→        f"state n_trades={st['n_trades']} -> crash/restart DUPLICATES trade records and breaks "
+   532→   532→        f"CSV-vs-state reconciliation (the mechanism behind the previously reported duplicate "
+   533→   533→        f"rows from the crashed replay attempt)",
+   534→   534→    ]
+   535→   535→    results("J. crash and recovery", items)
+   536→   536→
+   537→   537→# =====================================================================
+   538→   538→# TEST K — daily rollover, EOD and overlay behaviour
+   539→   539→# =====================================================================
+   540→   540→def test_k():
+   541→   541→    clear_ws()
+   542→   542→    st = fresh()
+   543→   543→    d1 = [B1, B2, B3,
+   544→   544→          bar(1004, 1005, 1002.5, 1004, 1000, d=4, hh=13),
+   545→   545→          bar(1004, 1005, 1002.5, 1004, 1000, d=4, hh=14),
+   546→   546→          bar(1004, 1005, 1002.5, 1004, 1000, d=4, hh=15)]
+   547→   547→    feed("ES", d1, st)
+   548→   548→    eng = pd.read_csv(ps.TRADES_F)
+   549→   549→    r = eng[eng["reason"] == "eod"].iloc[-1]
+   550→   550→    items = [f"day-1 EOD close: reason=eod, exit_ts={r['exit_ts']}, exit_px={r['exit_px']} "
+   551→   551→             f"(= the 15:00 bar CLOSE, i.e. the 16:00 ET price)"]
+   552→   552→    st["traded_today"] = True
+   553→   553→    ps.overlay_update(st, eod=True)
+   554→   554→    items.append(f"overlay eod update: Topstep tdays={st['overlays']['topstep']['tdays']}, "
+   555→   555→                 f"Apex tdays={st['overlays']['apex']['tdays']}, floors "
+   556→   556→                 f"A={st['overlays']['apex']['floor']:.0f}/T={st['overlays']['topstep']['floor']:.0f}")
+   557→   557→    feed("ES", [bar(1000, 1000, 1000, 1000, 1000, d=5, hh=10)], st)
+   558→   558→    items.append(f"day-2 first bar resets day state: date={st['day']['ES']['date']}, "
+   559→   559→                 f"trades={st['day']['ES']['trades']} (rollover OK; eod-missed path in test G)")
+   560→   560→    items.append("overlay gaps: NO consistency cap (Topstep best-day<55%), NO 30-day Apex "
+   561→   561→                 "window, NO monthly rebill fees; Topstep DLL $1,000 is message-only (no halt, "
+   562→   562→                 "no flatten); Apex trailed INTRADAY (hwm includes open P&L) although the PDF "
+   563→   563→                 "documents Apex eval DD as a $2,500 EOD trail")
+   564→   564→    results("K. daily rollover / EOD / overlays behaviour", items)
+   565→   565→
+   566→   566→# =====================================================================
+   567→   567→# TEST L — live Yahoo feed audit (single fetch per symbol, read-only)
+   568→   568→# =====================================================================
+   569→   569→def test_l():
+   570→   570→    items = []
+   571→   571→    now = datetime.now(ET)
+   572→   572→    for sym, yh, f in (("ES", "ES=F", "es_1h.csv"), ("NQ", "NQ=F", "nq_1h.csv")):
+   573→   573→        df = ps.fetch_1h(yh)
+   574→   574→        if df is None or df.empty:
+   575→   575→            items.append(f"{sym}: FEED RETURNED NOTHING at audit time")
+   576→   576→            continue
+   577→   577→        last = df.index[-1]
+   578→   578→        age = (now - (last + timedelta(hours=1))).total_seconds() / 60
+   579→   579→        items.append(f"{sym}: {len(df)} RTH bars returned; last completed bar {last} "
+   580→   580→                     f"(bar-end age {age:.0f} min at {now:%m-%d %H:%M} ET)")
+   581→   581→        stored = load_rth_raw(f"{DATA}/{f}")
+   582→   582→        common = df.index.intersection(stored.index)
+   583→   583→        if len(common):
+   584→   584→            dc = (df.loc[common, "Close"] - stored.loc[common, "Close"]).abs()
+   585→   585→            dv = (df.loc[common, "Volume"] - stored.loc[common, "Volume"]).abs() / stored.loc[common, "Volume"]
+   586→   586→            items.append(f"{sym}: {len(common)} overlapping bars vs stored file — max close "
+   587→   587→                         f"revision {dc.max():.2f} pts, median volume revision "
+   588→   588→                         f"{dv.median()*100:.1f}% (same endpoint, fetched weeks apart)")
+   589→   589→    items.append("feed properties: Yahoo ES=F/NQ=F continuous contracts, 1h bars, NO bid/ask, "
+   590→   590→                 "delayed/indicative for futures (NOT real-time; delay not independently "
+   591→   591→                 "measurable after the close at audit time); no contract-roll guard in the "
+   592→   592→                 "engine while the research backtest explicitly excluded roll-week sessions")
+   593→   593→    results("L. live market-data feed (audit-time probe)", items)
+   594→   594→
+   595→   595→# =====================================================================
+   596→   596→# TEST M — ES/NQ session alignment for replay
+   597→   597→# =====================================================================
+   598→   598→def test_m():
+   599→   599→    ses = {}
+   600→   600→    for sym, f in (("ES", "es_1h.csv"), ("NQ", "nq_1h.csv")):
+   601→   601→        rth = load_rth_raw(f"{DATA}/{f}")
+   602→   602→        ses[sym] = [g.index[0].date().isoformat()
+   603→   603→                    for _, g in rth.groupby(rth.index.normalize()) if len(g) >= 5][-5:]
+   604→   604→    items = [f"last-5 session lists ES==NQ: {ses['ES'] == ses['NQ']}; ES={ses['ES']}, NQ={ses['NQ']}",
+   605→   605→             "run_replay indexes NQ days positionally against ES-derived dates -> a missing NQ "
+   606→   606→             "session would silently replay the WRONG NQ day (latent misalignment, not currently "
+   607→   607→             "triggered)"]
+   608→   608→    results("M. replay session alignment", items)
+   609→   609→
+   610→   610→if __name__ == "__main__":
+   611→   611→    test_a(); test_b(); test_c(); test_d(); test_e(); test_f()
+   612→   612→    test_g(); test_h(); test_i(); test_j(); test_k(); test_l(); test_m()
+   613→   613→    with open(f"{WS}/audit_results.json", "w") as fh:
+   614→   614→        json.dump(RES, fh, indent=1, default=str)
+   615→   615→    print("\nsaved ->", f"{WS}/audit_results.json")
+   616→   616→

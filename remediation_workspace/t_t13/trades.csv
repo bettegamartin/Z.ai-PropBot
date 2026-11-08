@@ -1,0 +1,2 @@
+mode,trade_id,ts,sym,side,contracts,signal_px,signal_ts,entry_px,entry_ts,exit_ts,exit_px,reason,fill_method,exec_lag_min,gross_usd,costs_usd,net_usd,cum_eq
+audit,2026-11-05_ES_01,2026-11-05T14:00:00-05:00,ES,short,2,1005.55,2026-11-05T12:00:00-05:00,1005.55,2026-11-05T12:00:00-05:00,2026-11-05T14:00:00-05:00,1001.44,tp,bar_fill,0,41.06,4.9,36.16,36.16

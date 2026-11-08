@@ -1,0 +1,42 @@
+{
+ "schema_version": 2,
+ "cum": 25.54,
+ "n_trades": 5,
+ "n_entries": 5,
+ "trading_days": 3,
+ "traded_today": false,
+ "today": "2026-11-05",
+ "day": {},
+ "done_bars": {},
+ "rejected_bars": {},
+ "last_bar_ts": {},
+ "feed_status": {},
+ "halted_date": null,
+ "halted_reason": null,
+ "cap_blocked_date": null,
+ "cap_blocked_reason": null,
+ "last_summary": null,
+ "started": "2026-11-05T00:22:06.834530-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 25.54,
+   "floor": -1974.46,
+   "tdays": 3,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 170.1,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 25.54,
+   "floor": -2474.46,
+   "tdays": 3,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 170.1,
+   "start": "2026-11-05"
+  }
+ }
+}

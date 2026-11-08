@@ -1,0 +1,2 @@
+mode,ts,sym,side,contracts,entry_px,entry_ts,exit_ts,exit_px,reason,gross_usd,costs_usd,net_usd,cum_eq
+audit,2026-11-04T15:00:00-05:00,ES,short,2,1005.55,2026-11-04T12:00:00-05:00,2026-11-04T15:00:00-05:00,1004.0,eod,15.5,4.9,10.6,10.6

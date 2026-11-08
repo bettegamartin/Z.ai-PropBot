@@ -1,0 +1,100 @@
+{
+ "schema_version": 2,
+ "cum": 1772.8777777777827,
+ "n_trades": 1,
+ "n_entries": 2,
+ "trading_days": 1,
+ "traded_today": true,
+ "today": "2026-11-09",
+ "day": {
+  "ES": {
+   "date": "2026-11-09",
+   "vwap_n": 18126666.666666664,
+   "vwap_d": 3000.0,
+   "devs": [
+    0.0,
+    83.33333333333394,
+    -12.222222222221717
+   ],
+   "day_open": 6000.0,
+   "trades": 1,
+   "pos": {
+    "side": -1,
+    "entry_px": 6220.0,
+    "stop_px": 6282.4013295204995,
+    "tp_px": 6042.222222222222,
+    "signal_px": 6146.224438089721,
+    "signal_ts": "2026-11-09 12:00:00-05:00",
+    "entry_ts": "2026-11-09 13:20:00-05:00",
+    "entry_exec_ts": "2026-11-09 13:20:00-05:00",
+    "contracts": 4,
+    "fill_method": "poll_quote",
+    "exec_lag_min": 20,
+    "trade_id": "2026-11-09_ES_01"
+   },
+   "day_realized": 0.0,
+   "halted": false,
+   "halted_reason": null,
+   "last_close": 6030.0,
+   "last_ts": "2026-11-09 12:00:00-05:00",
+   "mark_px": 6220.0
+  }
+ },
+ "done_bars": {
+  "ES": [
+   "2026-11-06T10:00:00-05:00",
+   "2026-11-06T11:00:00-05:00",
+   "2026-11-06T12:00:00-05:00",
+   "2026-11-06T13:00:00-05:00",
+   "2026-11-06T14:00:00-05:00",
+   "2026-11-09T10:00:00-05:00",
+   "2026-11-09T11:00:00-05:00",
+   "2026-11-09T12:00:00-05:00"
+  ],
+  "NQ": [
+   "2026-11-06T10:00:00-05:00",
+   "2026-11-06T11:00:00-05:00",
+   "2026-11-06T13:00:00-05:00"
+  ]
+ },
+ "rejected_bars": {
+  "ES": [],
+  "NQ": []
+ },
+ "last_bar_ts": {
+  "ES": "2026-11-09T12:00:00-05:00",
+  "NQ": "2026-11-06T13:00:00-05:00"
+ },
+ "feed_status": {
+  "ES": "ok",
+  "NQ": "unavailable"
+ },
+ "halted_date": null,
+ "halted_reason": null,
+ "cap_blocked_date": "2026-11-06",
+ "cap_blocked_reason": "account day P&L +1772.88 reached the $1650 consistency cap (bot-side daily profit cap)",
+ "last_summary": "2026-11-06",
+ "started": "2026-11-05T00:18:34.312490-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 1772.8777777777827,
+   "floor": -227.12222222221726,
+   "tdays": 1,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 1772.8777777777827,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 1772.8777777777827,
+   "floor": -727.1222222222173,
+   "tdays": 1,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 1772.8777777777827,
+   "start": "2026-11-05"
+  }
+ }
+}

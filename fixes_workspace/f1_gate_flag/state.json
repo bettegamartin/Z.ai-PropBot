@@ -1,0 +1,62 @@
+{
+ "schema_version": 2,
+ "cum": 1000.0,
+ "n_trades": 0,
+ "n_entries": 0,
+ "trading_days": 0,
+ "traded_today": true,
+ "today": "2026-11-09",
+ "day": {
+  "ES": {
+   "date": "2026-11-09",
+   "vwap_n": 18126666.666666664,
+   "vwap_d": 3000.0,
+   "devs": [
+    0.0,
+    83.33333333333394,
+    -12.222222222221717
+   ],
+   "day_open": 6000.0,
+   "trades": 0,
+   "pos": null,
+   "day_realized": 1000.0,
+   "halted": false,
+   "halted_reason": null,
+   "last_close": 6030.0,
+   "last_ts": "2026-11-09 12:00:00-05:00",
+   "mark_px": null
+  }
+ },
+ "done_bars": {},
+ "rejected_bars": {},
+ "last_bar_ts": {},
+ "feed_status": {},
+ "halted_date": null,
+ "halted_reason": null,
+ "cap_blocked_date": "2026-11-09",
+ "cap_blocked_reason": null,
+ "last_summary": null,
+ "started": "2026-11-05T00:18:40.076839-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 0.0,
+   "floor": -2000.0,
+   "tdays": 0,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 0.0,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 0.0,
+   "floor": -2500.0,
+   "tdays": 0,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 0.0,
+   "start": "2026-11-05"
+  }
+ }
+}

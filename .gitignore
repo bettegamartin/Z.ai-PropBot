@@ -1,0 +1,6 @@
+skills/
+node_modules/
+.env
+*.bundle
+__pycache__/
+download/nt8/

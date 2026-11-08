@@ -1,0 +1,1 @@
+mode,trade_id,ts,sym,side,contracts,signal_px,signal_ts,entry_px,entry_ts,exit_ts,exit_px,reason,fill_method,exec_lag_min,gross_usd,costs_usd,net_usd,cum_eq

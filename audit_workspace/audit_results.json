@@ -1,0 +1,79 @@
+{
+ "tests": {
+  "A. journal/state/log reconciliation": [
+   "journal rows by mode: {'replay': 8} (live rows: 0)",
+   "exact-duplicate trade rows in journal: 0",
+   "rows failing arithmetic re-check at +/-6c: none; max net-P&L reconstruction error from JOURNAL prices = $0.030 (P&L booked on full-precision VWAP exits, journal shows rounded prices -> rows not exactly reproducible from the CSV alone)",
+   "cum_eq chain consistent: True",
+   "REPLAY CONTAMINATION: 8 of 8 rows in the LIVE journal are replay rows (engine writes mode=replay into the same CSV/log)",
+   "state.json: cum=0.0, n_trades=0 -> state counts ZERO trades while journal cum_eq chain reaches +279.54 -> CSV/state reconciliation impossible by design (replay rows have no state counterpart)",
+   "log.md: DAY SUMMARY blocks=1; '- -' double-bullet cosmetic defect: True; per-line wall-clock timestamps: ABSENT",
+   "equity.csv rows: 1 (day-summary marks only)",
+   "STATE REWIND EVIDENCE: st['day'] dates=['2026-11-02', '2026-11-02'] last_ts=2026-11-02 15:00:00-05:00 while done_bars hold Nov-3/Nov-4 bars -> the last poll re-processed Nov-2 bars from a stale feed and rewound day state"
+  ],
+  "B. independent signal/VWAP recalculation": [
+   "isolated fresh replay of last 5 stored sessions: 8 trades (reproduces the recorded Nov-4 smoke test exactly: [7781.53, 29901.89, 7727.47, 7643.28, 7634.1, 28593.12, 7617.19, 28417.24])",
+   "per-symbol trade counts engine vs independent: {'ES': (5, 5), 'NQ': (3, 3)}",
+   "level/exit mismatches: NONE \u2014 VWAP levels, sigma, entries, exits and reasons reproduce exactly",
+   "independent calc confirms signal bars are ONLY 12:00/13:00 stamps (devs>=3 + hour<14): the PDF's 'Signals 10:00-14:00' is the nominal loop window; the backtest's range(2,n) makes 12:00 the earliest possible signal bar -> the harness (12:00/13:00) DOES match the winning backtest configuration",
+   "ES Nov-2 state (written by LIVE Yahoo polls) vs stored-file recompute: volume 1373392 vs 1373392 (0.00% diff), max dev-series delta 0.000 pts -> consistent (revision noise only)",
+   "NQ Nov-2 state (written by LIVE Yahoo polls) vs stored-file recompute: volume 465945 vs 465945 (0.00% diff), max dev-series delta 0.000 pts -> consistent (revision noise only)"
+  ],
+  "C. same-bar re-entry + gap-through stop (engine vs backtest)": [
+   "paper engine on crafted bars: 2 trades, reasons=['stop', 'tp'] (trade1 entered 1005.55 on the 12:00 bar, stopped on the 13:00 bar, and the engine RE-ENTERED SHORT on that same 13:00 stop bar at 1009.50)",
+   "backtest sig_vwap on the IDENTICAL bars: 1 trade(s) \u2014 the backtest's 'i <= exit_i' skip forbids same-bar re-entry",
+   "FINDING (HIGH): the harness is more aggressive than the researched backtest \u2014 same-bar re-entry after a stop-out; inflates trade count/costs vs the research",
+   "gap-through stop fill: 13:00 bar OPENS at 1009.5, already beyond the short stop 1008.01; engine books the exit AT the stop price (net $-29.53) while a real stop-market would fill near the open (net $-44.40) -> $-14.87 optimism per event, and the same optimism applies to the shared research backtest",
+   "same-bar re-entry frequency over full stored history (1174 ES+NQ sessions): 74 sessions would produce a DIFFERENT trade count under the engine's re-entry rule vs the backtest's rule -> rare but real behavioural divergence"
+  ],
+  "D. daily loss stop ($400) enforcement": [
+   "day already -$450 (beyond the spec's -$400 halt) with 2 trades taken: engine opened trade #3 -> True",
+   "$400 DAILY STOP NOT ENFORCED \u2014 'dstop' configured once and never referenced; 'halted' initialised False and never set True anywhere in paper_step.py",
+   "impact: Table 8's core risk control ('Halt for the day at -$400') is absent; the harness cannot validate the research's prop-risk thesis and could paper-trade paths the real bot would never take"
+  ],
+  "E. stop/target executor semantics": [
+   "low touches target EXACTLY (no 1-tick trade-through): position still open = True -> trade-through rule enforced",
+   "after +1-tick trade-through bar: reason=['tp'], exit=[1001.44] -> TP fills at the exact VWAP level",
+   "stop AND target both inside one bar -> reason taken: ['tp', 'stop'] (stop-before-target = conservative, matches backtest)"
+  ],
+  "F. 20-minute polling / fill staleness": [
+   "historical signal events analysed: 1127 (ES+NQ, full stored 1h history)",
+   "poll timing: a 1h bar becomes actionable at the first poll >= its close (0-20 min later); entries are booked at max(band, SIGNAL-bar open) \u2014 a price that is 60-100 min old at action time; the 13:00 signal bar is acted on at the 14:00-14:40 polls -> effective live entry window extends ~40-100 min beyond the backtest's at-the-bar fill",
+   "entry staleness, engine entry vs next-bar-open realistic fill (2 micros): mean $+61.94, median $+40.60, P95 $+280.38, worst $-266.48; |delta| > 1 tick in 99% of events -> live-recorded entries are systematically optimistic vs anything executable in real time"
+  ],
+  "G. missing-data handling / session-end liquidation": [
+   "with the 15:00 bar missing and a position open: reason=eod_missed, exit_ts=2026-11-04T14:00:00-05:00 (NEXT MORNING's bar), exit_px=1004.0 (day-1 14:00 close) -> PHANTOM OVERNIGHT HOLD liquidated retroactively at a stale price; a real bot would have been flat by 15:59",
+   "with the 15:00 bar present, EOD close executes at the 15:00 bar CLOSE = 16:00 ET price (spec: flat BY 15:59 \u2014 1-minute miss, shared with the backtest)"
+  ],
+  "H. stale feed rewind": [
+   "fresh Nov-4 session processed (done_bars=6, day=2026-11-03), then the fetch returns ONLY an older session's bars (their keys were pruned from the 12-key window; Oct-30 in this demo, Nov-2 in the production state)",
+   "after the stale fetch: day rewound to 2026-10-30, day_open=7667.0, vwap_d=1730485 -> STATE REWIND REPRODUCED IN ISOLATION",
+   "entries on stale bars are blocked only by the 40-min 'fresh' gate; VWAP/dev/day_open/last_close are overwritten with 2-day-old data and open_pnl marks against stale closes; the status line still prints 'feed ok' (only an EMPTY frame is flagged)"
+  ],
+  "I. duplicate scheduled execution": [
+   "two overlapping runs on the same state (paper_step.py has NO lockfile): journal rows=2, duplicate rows=1, state n_trades=1 -> duplicate trade records; last writer wins the state file"
+  ],
+  "J. crash and recovery": [
+   "crash after journal append but before atomic_json: rows on disk after crash=1, state file NOT updated (still pre-crash)",
+   "after recovery re-run: journal rows=2, duplicate rows=1, state n_trades=1 -> crash/restart DUPLICATES trade records and breaks CSV-vs-state reconciliation (the mechanism behind the previously reported duplicate rows from the crashed replay attempt)"
+  ],
+  "K. daily rollover / EOD / overlays behaviour": [
+   "day-1 EOD close: reason=eod, exit_ts=2026-11-04T15:00:00-05:00, exit_px=1004.0 (= the 15:00 bar CLOSE, i.e. the 16:00 ET price)",
+   "overlay eod update: Topstep tdays=1, Apex tdays=1, floors A=-2489/T=-2000",
+   "day-2 first bar resets day state: date=2026-11-05, trades=0 (rollover OK; eod-missed path in test G)",
+   "overlay gaps: NO consistency cap (Topstep best-day<55%), NO 30-day Apex window, NO monthly rebill fees; Topstep DLL $1,000 is message-only (no halt, no flatten); Apex trailed INTRADAY (hwm includes open P&L) although the PDF documents Apex eval DD as a $2,500 EOD trail"
+  ],
+  "L. live market-data feed (audit-time probe)": [
+   "ES: 24 RTH bars returned; last completed bar 2026-11-04 15:00:00-05:00 (bar-end age 208 min at 11-04 19:28 ET)",
+   "ES: 18 overlapping bars vs stored file \u2014 max close revision 0.00 pts, median volume revision 0.0% (same endpoint, fetched weeks apart)",
+   "NQ: 24 RTH bars returned; last completed bar 2026-11-04 15:00:00-05:00 (bar-end age 208 min at 11-04 19:28 ET)",
+   "NQ: 18 overlapping bars vs stored file \u2014 max close revision 0.00 pts, median volume revision 0.0% (same endpoint, fetched weeks apart)",
+   "feed properties: Yahoo ES=F/NQ=F continuous contracts, 1h bars, NO bid/ask, delayed/indicative for futures (NOT real-time; delay not independently measurable after the close at audit time); no contract-roll guard in the engine while the research backtest explicitly excluded roll-week sessions"
+  ],
+  "M. replay session alignment": [
+   "last-5 session lists ES==NQ: True; ES=['2026-10-28', '2026-10-29', '2026-10-30', '2026-11-02', '2026-11-03'], NQ=['2026-10-28', '2026-10-29', '2026-10-30', '2026-11-02', '2026-11-03']",
+   "run_replay indexes NQ days positionally against ES-derived dates -> a missing NQ session would silently replay the WRONG NQ day (latent misalignment, not currently triggered)"
+  ]
+ },
+ "notes": []
+}

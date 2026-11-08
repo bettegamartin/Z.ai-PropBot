@@ -1,0 +1,2 @@
+mode,trade_id,ts,sym,side,contracts,signal_px,signal_ts,entry_px,entry_ts,exit_ts,exit_px,reason,fill_method,exec_lag_min,gross_usd,costs_usd,net_usd,cum_eq
+replay,2026-11-01_NQ_99,2026-11-01T15:00:00-05:00,NQ,long,2,25000.0,2026-11-01T13:00:00-05:00,25000.0,2026-11-01T13:00:00-05:00,2026-11-01T14:00:00-05:00,25050.0,tp,bar_fill,0,100.00,3.40,96.60,96.60

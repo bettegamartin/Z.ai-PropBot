@@ -1,0 +1,2 @@
+mode,trade_id,ts,sym,side,contracts,signal_px,signal_ts,entry_px,entry_ts,exit_ts,exit_px,reason,fill_method,exec_lag_min,gross_usd,costs_usd,net_usd,cum_eq
+live,2026-11-06_ES_01,2026-11-06T13:20:00-05:00,ES,short,2,6036.11,2026-11-06T12:00:00-05:00,5940.0,2026-11-06T13:20:00-05:00,2026-11-06T13:20:00-05:00,5940.0,tp_poll,poll_quote,20,-0.0,4.9,-4.9,-4.9

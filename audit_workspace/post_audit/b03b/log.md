@@ -1,0 +1,4 @@
+- --- live run 2026-11-06T13:20:00-05:00 ---
+- `live` 11-06 13:20 ET **ES 2 micro SHORT opened** signal 6036.11 (12:00 bar) -> filled 5940.00 @ 13:20 (poll_quote, lag 20m; stop 5993.27, target 5947.33, sd 44.39, id 2026-11-06_ES_01)
+- `live` target already traded through at action time (ES fill 5940.00 <= target-tick 5947.08) -> immediate exit at the observable price
+- `live` 11-06 13:20 ET **ES 2 micro SHORT closed (tp_poll)** 5940.00 -> 5940.00 = $-4.90 (day -4.90, cum $-4.90)

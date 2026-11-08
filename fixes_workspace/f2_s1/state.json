@@ -1,0 +1,96 @@
+{
+ "schema_version": 2,
+ "cum": 200.0,
+ "n_trades": 0,
+ "n_entries": 0,
+ "trading_days": 1,
+ "traded_today": true,
+ "today": "2026-11-06",
+ "day": {
+  "ES": {
+   "date": "2026-11-06",
+   "vwap_n": 4821333.333333334,
+   "vwap_d": 800.0,
+   "devs": [
+    3.3333333333321207
+   ],
+   "day_open": 6020.0,
+   "trades": 1,
+   "pos": null,
+   "day_realized": 200.0,
+   "halted": false,
+   "halted_reason": null,
+   "last_close": 6030.0,
+   "last_ts": "2026-11-06 15:00:00-05:00",
+   "mark_px": null
+  },
+  "NQ": {
+   "date": "2026-11-05",
+   "vwap_n": 0.0,
+   "vwap_d": 0.0,
+   "devs": [],
+   "day_open": null,
+   "trades": 2,
+   "pos": {
+    "side": 1,
+    "entry_px": 25000.0,
+    "stop_px": 24900.0,
+    "tp_px": 25100.0,
+    "entry_ts": "2026-11-05T12:20:00-05:00",
+    "contracts": 2,
+    "fill_method": "poll_quote",
+    "exec_lag_min": 0,
+    "trade_id": "2026-11-05_NQ_01"
+   },
+   "day_realized": -300.0,
+   "halted": false,
+   "halted_reason": null,
+   "last_close": 25050.0,
+   "last_ts": null,
+   "mark_px": null
+  }
+ },
+ "done_bars": {
+  "ES": [
+   "2026-11-06T15:00:00-05:00"
+  ]
+ },
+ "rejected_bars": {
+  "ES": []
+ },
+ "last_bar_ts": {
+  "ES": "2026-11-06T15:00:00-05:00"
+ },
+ "feed_status": {
+  "ES": "ok",
+  "NQ": "unavailable"
+ },
+ "halted_date": null,
+ "halted_reason": null,
+ "cap_blocked_date": null,
+ "cap_blocked_reason": null,
+ "last_summary": "2026-11-06",
+ "started": "2026-11-05T00:18:43.835276-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 200.0,
+   "floor": -1800.0,
+   "tdays": 1,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 200.0,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 200.0,
+   "floor": -2300.0,
+   "tdays": 1,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 200.0,
+   "start": "2026-11-05"
+  }
+ }
+}

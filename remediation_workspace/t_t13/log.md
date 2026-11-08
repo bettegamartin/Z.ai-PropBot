@@ -1,0 +1,2 @@
+- `audit` 11-05 12:00 ET **ES 2 micro SHORT opened** @ 1005.55 (stop 1008.01, target 1001.44, sd 2.05, id 2026-11-05_ES_01)
+- `audit` 11-05 14:00 ET **ES 2 micro SHORT closed (tp)** 1005.55 -> 1001.44 = $+36.16 (day +36.16, cum $+36.16)

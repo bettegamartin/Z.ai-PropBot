@@ -1,0 +1,647 @@
+{
+ "B01 daily stop blocks + account-level + reset": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "A1 poll exits 0",
+    ""
+   ],
+   [
+    true,
+    "entry opened at the poll's observable price 6044.00",
+    "6044.0"
+   ],
+   [
+    true,
+    "signal price recorded separately (6036.11 band, never used as fill)",
+    "6036.111041579725"
+   ],
+   [
+    true,
+    "stop recomputed from the FILL = fill + 1.2*sigma (auditor's sigma)",
+    "6097.266624947835"
+   ],
+   [
+    true,
+    "target = signal-bar VWAP (auditor's recompute)",
+    "5947.333333333333"
+   ],
+   [
+    true,
+    "trade_id deterministic format",
+    "2026-11-06_ES_01"
+   ],
+   [
+    true,
+    "exec lag recorded = 20 min",
+    "20"
+   ],
+   [
+    true,
+    "no journal row while the position is open",
+    ""
+   ],
+   [
+    true,
+    "A2 poll exits 0",
+    ""
+   ],
+   [
+    true,
+    "stop-out closed at the stop level 6097.27 (auditor's 6044+1.2sigma)",
+    "-537.5662494783522"
+   ],
+   [
+    true,
+    "HALT FIRED: state.halted_date == 2026-11-06",
+    "2026-11-06"
+   ],
+   [
+    true,
+    "per-symbol halted flag set",
+    ""
+   ],
+   [
+    true,
+    "diary announces the account-level daily stop",
+    ""
+   ],
+   [
+    true,
+    "journal has exactly 1 row",
+    "1"
+   ],
+   [
+    true,
+    "row: reason=stop, net -537.57, cum -537.57",
+    "{'mode': 'live', 'trade_id': '2026-11-06_ES_01', 'ts': '2026-11-06T13:00:00-05:00', 'sym': 'ES', 'side': 'short', 'contracts': '2', 'signal_px': '6036.11', 'signal_ts': '2026-11-06 12:00:00-05:00', 'entry_px': '6044.0', 'entry_ts': '2026-11-06T13:20:00-05:00', 'exit_ts': '2026-11-06T13:00:00-05:00', 'exit_px': '6097.27', 'reason': 'stop', 'fill_method': 'poll_quote', 'exec_lag_min': '20', 'gross_usd': '-532.67', 'costs_usd': '4.9', 'net_usd': '-537.57', 'cum_eq': '-537.57'}"
+   ],
+   [
+    true,
+    "row: signal 6036.11 vs entry 6044.00 recorded apart",
+    ""
+   ],
+   [
+    true,
+    "A3: NQ signal the SAME day is blocked (account-level, NQ day flag not set)",
+    "{'date': '2026-11-06', 'vwap_n': 75196666.66666667, 'vwap_d': 3000.0, 'devs': [0.0, 125.0, 74.44444444444161], 'day_open': 25000.0, 'trades': 0, 'pos': None, 'day_realized': 0.0, 'halted': False, 'halted_reason': None, 'last_close': 25140.0, 'last_ts': '2026-11-06 13:00:00-05:00', 'mark_px': None}"
+   ],
+   [
+    true,
+    "A3: no re-entry on ES either (journal unchanged at exactly 1 row)",
+    ""
+   ],
+   [
+    true,
+    "A4: NEXT trading day (Nov-9) entries re-enabled and trade opens",
+    "2026-11-09_ES_01"
+   ],
+   [
+    true,
+    "A4: stale halted_date (Nov-6) is inert on the new day",
+    "2026-11-06"
+   ]
+  ]
+ },
+ "B02 halt survives restart (cold reload, flag/condition independence)": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "cold reload (flag kept): signal BLOCKED",
+    "['RESULT: BLOCKED (trades=0, halted=False, halted_date=2026-11-06)']"
+   ],
+   [
+    true,
+    "cold reload (flag DELETED): signal BLOCKED",
+    "['RESULT: BLOCKED (trades=0, halted=False, halted_date=None)']"
+   ],
+   [
+    true,
+    "persisted flag blocks even when the live condition is back above -$400",
+    "['RESULT: BLOCKED (trades=0, halted=False, halted_date=2026-11-06)']"
+   ]
+  ]
+ },
+ "B03 fills at observable prices; variants": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "B1: fill booked at observable 6020.00, signal 6036.11 recorded apart",
+    "(6020.0, 6036.111041579725)"
+   ],
+   [
+    true,
+    "B1: stop anchored to the FILL (6020+1.2sigma), not to the signal",
+    "6073.266624947835"
+   ],
+   [
+    true,
+    "B2: closed row keeps signal/execution apart with method+lag",
+    "{'mode': 'live', 'trade_id': '2026-11-06_ES_01', 'ts': '2026-11-06T13:00:00-05:00', 'sym': 'ES', 'side': 'short', 'contracts': '2', 'signal_px': '6036.11', 'signal_ts': '2026-11-06 12:00:00-05:00', 'entry_px': '6020.0', 'entry_ts': '2026-11-06T13:20:00-05:00', 'exit_ts': '2026-11-06T13:00:00-05:00', 'exit_px': '6073.27', 'reason': 'stop', 'fill_method': 'poll_quote', 'exec_lag_min': '20', 'gross_usd': '-532.67', 'costs_usd': '4.9', 'net_usd': '-537.57', 'cum_eq': '-537.57'}"
+   ],
+   [
+    true,
+    "C1: target pre-traded-through -> immediate exit AT the observable price (tp_poll)",
+    "{'mode': 'live', 'trade_id': '2026-11-06_ES_01', 'ts': '2026-11-06T13:20:00-05:00', 'sym': 'ES', 'side': 'short', 'contracts': '2', 'signal_px': '6036.11', 'signal_ts': '2026-11-06T12:00:00-05:00', 'entry_px': '5940.0', 'entry_ts': '2026-11-06T13:20:00-05:00', 'exit_ts': '2026-11-06T13:20:00-05:00', 'exit_px': '5940.0', 'reason': 'tp_poll', 'fill_method': 'poll_quote', 'exec_lag_min': '20', 'gross_usd': '-0.0', 'costs_usd': '4.9', 'net_usd': '-4.9', 'cum_eq': '-4.9'}"
+   ],
+   [
+    true,
+    "C1: friction-only loss does NOT trip the daily stop",
+    "(None, -4.9)"
+   ],
+   [
+    true,
+    "no-price poll takes NO entry and logs the explicit skip note",
+    "`live` 11-06 12:00 ET ES signal (SHORT @ 6036.11) NOT taken: no fresh observable price at the acting poll (stale/delayed feed)"
+   ]
+  ]
+ },
+ "B04 no backfilled exits (predates guard)": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "short opened at 6044 with stop 6097.27 / target 5947.33",
+    ""
+   ],
+   [
+    true,
+    "pre-entry bar that spans stop AND target did NOT close the position",
+    ""
+   ],
+   [
+    true,
+    "post-entry bar closes at the stop level (reason stop)",
+    "-537.5662494783522"
+   ]
+  ]
+ },
+ "B05 flock serialises overlapping runs": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "lock holder: second run prints SKIP",
+    "SKIP: another paper_step --live run holds the lock (overlap guard)."
+   ],
+   [
+    true,
+    "lock holder: SKIP run wrote NOTHING (no state, no diary, no journal)",
+    "[]"
+   ],
+   [
+    true,
+    "concurrent pair: exactly one SKIP and one processed run",
+    "(1, 1, 'LIVE Fri 11-06 13:20 ET | cum $+0.00 | open: ES S2@6044.00 |', 'SKIP: another paper_step --live run holds the lock (overlap ')"
+   ],
+   [
+    true,
+    "concurrent pair: exactly one entry recorded",
+    "1"
+   ]
+  ]
+ },
+ "B06 crash recovery without duplicates + repair": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "crash injected after the journal write",
+    "row(s) written to /home/z/my-project/audit_workspace/post_audit/b06/trades.csv; dying before state save\nprocess died as designed (journal durable, state stale)\n"
+   ],
+   [
+    true,
+    "crashed run: journal row durable on disk",
+    ""
+   ],
+   [
+    true,
+    "crashed run: state.json never saved",
+    ""
+   ],
+   [
+    true,
+    "recovery run reports JOURNAL DEDUP (same regenerated trade_id skipped)",
+    "JOURNAL DEDUP: 1 row(s) skipped (trade_id already on disk)\nLIVE Fri 11-06 13:20 ET | cum $-537.57 | open: flat | Apex floor -2500 | Topstep floor -2000 | feed E"
+   ],
+   [
+    true,
+    "recovery: journal still exactly 1 row (no duplicate)",
+    "1"
+   ],
+   [
+    true,
+    "recovery: state reconciles with the journal (n_trades, cum == cum_eq)",
+    "(1, -537.5662494783522, '-537.57')"
+   ],
+   [
+    true,
+    "torn tail line detected and repaired (JOURNAL REPAIR)",
+    "STATE MIGRATION (schema v2): pruned stale day[ES] dated 2026-11-06 (no open position)\nJOURNAL REPAIR: dropped 1 malforme"
+   ],
+   [
+    true,
+    "second day's trade appended with a fresh per-day sequence id",
+    "['live,2026-11-06_ES_01,2026-11-06T13:00:00-05:00,ES,short,2,6036.11,2026-11-06T12', 'live,2026-11-09_ES_01,2026-11-09T13:00:00-05:00,ES,short,2,6036.11,2026-11-09T12']"
+   ],
+   [
+    true,
+    "state reconciles again after repair (2 trades, cum matches last row)",
+    "(2, -1075.1324989567045)"
+   ]
+  ]
+ },
+ "B07 replay isolation + abort-guard property + inert injected rows": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "CLI --replay exits 0",
+    ""
+   ],
+   [
+    true,
+    "replay wrote its own journal under <home>/replay/",
+    ""
+   ],
+   [
+    true,
+    "replay left NO live files in the home root",
+    ""
+   ],
+   [
+    true,
+    "replay stdout declares isolation",
+    ""
+   ],
+   [
+    true,
+    "replay rows are tagged mode=replay",
+    "replay,2026-11-02_ES_01,2026-11-02T12:00:00-05:00,ES,long,2,"
+   ],
+   [
+    true,
+    "replay_dir_for(/home/z/my-project/download/paper_trading) never resolves to a live root",
+    "/home/z/my-project/download/paper_trading/replay"
+   ],
+   [
+    true,
+    "replay_dir_for(/tmp) never resolves to a live root",
+    "/tmp/replay"
+   ],
+   [
+    true,
+    "replay_dir_for(/home/z/my-project/audit_workspace/post_audit) never resolves to a live root",
+    "/home/z/my-project/audit_workspace/post_audit/replay"
+   ],
+   [
+    true,
+    "replay_dir_for(/home/z/my-project/audit_workspace/post_audit/x/replay) never resolves to a live root",
+    "/home/z/my-project/audit_workspace/post_audit/x/replay/replay"
+   ],
+   [
+    true,
+    "injected mode=replay row left untouched and ignored by live accounting",
+    "(0.0, 0)"
+   ]
+  ]
+ },
+ "B08 Topstep consistency boundary; Apex uncapped": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "cap math: round(0.55*3000,2) == 1650.00 exactly",
+    ""
+   ],
+   [
+    true,
+    "best day exactly $1,650 (=55% of target) BLOCKS the pass",
+    "['Topstep 50K target reached but the consistency cap blocks a PASS (best day $1650 >= 1650 = 55% of target) -- keeps trading']"
+   ],
+   [
+    true,
+    "best day $1,600 (<55%) PASSES and charges the $149 activation",
+    "{'base_cum': 0.0, 'hwm_eod': 0.0, 'floor': -2000.0, 'tdays': 2, 'fees': 149.0, 'attempts': 1, 'best_day': 1600.0, 'start': '2026-11-06', 'done': True, 'passed_on': '2026-11-05'}"
+   ],
+   [
+    true,
+    "Apex has NO consistency cap (best day $2,999 still passes) -- per research Table 4",
+    "{'base_cum': 0.0, 'hwm_eod': 0.0, 'floor': -2500.0, 'tdays': 7, 'fees': 99.0, 'attempts': 1, 'best_day': 2999.0, 'start': '2026-11-06', 'done': True, 'passed_on': '2026-11-05'}"
+   ]
+  ]
+ },
+ "B09 EOD trails for both overlays; bust at current equity": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "intraday equity +2380 does NOT raise either floor (hwm_eod stays 0)",
+    "(-2500.0, -2000.0)"
+   ],
+   [
+    true,
+    "EOD closed equity +1000 sets hwm_eod=1000 -> Apex floor -1500, Topstep -1000 (capped <0)",
+    "(-1500.0, -1000.0)"
+   ],
+   [
+    true,
+    "later intraday spike still leaves both floors untouched",
+    ""
+   ],
+   [
+    true,
+    "Topstep floor capped at breakeven (0); Apex floor uncapped (+500)",
+    "(0.0, 500.0)"
+   ],
+   [
+    true,
+    "Apex bust fires on current equity (-1501 <= -1500): new attempt, +$33 eval fee",
+    "{'base_cum': -1501.0, 'hwm_eod': 0.0, 'floor': -2500.0, 'tdays': 0, 'fees': 33.0, 'attempts': 2, 'best_day': 0.0, 'start': '2026-11-05'}"
+   ]
+  ]
+ },
+ "B10 stale bars rejected, no rewind": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "2 re-offered old bars rejected (Nov-2 x2, outside the done-bars window)",
+    "['2026-11-02T10:00:00-05:00', '2026-11-02T11:00:00-05:00']"
+   ],
+   [
+    true,
+    "re-offered bar INSIDE done_bars dedups silently (not counted as rejection)",
+    ""
+   ],
+   [
+    true,
+    "rejection warned in the status line",
+    "LIVE Thu 11-05 10:20 ET | cum $+0.00 | open: flat | Apex floor -2500 | Topstep floor -2000 | feed ES:ok NQ:ok | ES: 2 stale/out-of-order bar(s) rejected (no rewind)"
+   ],
+   [
+    true,
+    "state moved FORWARD only: day is Nov-5, last_bar_ts Nov-5 11:00",
+    "{'ES': '2026-11-05T11:00:00-05:00', 'NQ': '2026-11-05T11:00:00-05:00'}"
+   ],
+   [
+    true,
+    "VWAP state built ONLY from the new bars (auditor recompute: 6306.404)",
+    "6306.40350877193"
+   ],
+   [
+    true,
+    "no trades, cum untouched",
+    ""
+   ]
+  ]
+ },
+ "B11 feed health classification + gating + fallback": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "classify: no data -> unavailable",
+    ""
+   ],
+   [
+    true,
+    "classify: empty frame -> unavailable",
+    ""
+   ],
+   [
+    true,
+    "classify: no bar today, 11:30 RTH -> stale",
+    ""
+   ],
+   [
+    true,
+    "classify: no bar today, 10:30 RTH -> awaiting",
+    ""
+   ],
+   [
+    true,
+    "classify: forming quote -> ok",
+    ""
+   ],
+   [
+    true,
+    "classify: today bar 30 min old, no quote -> ok (bar current)",
+    ""
+   ],
+   [
+    true,
+    "classify: today bar 150 min old, no quote -> stale",
+    ""
+   ],
+   [
+    true,
+    "run-level: per-symbol feed status recorded (ES stale, NQ ok)",
+    "{'ES': 'stale (no completed bars today as of 13:20 ET)', 'NQ': 'ok'}"
+   ],
+   [
+    true,
+    "run-level: status line shows both symbols' health",
+    "LIVE Fri 11-06 13:20 ET | cum $+0.00 | open: NQ S2@25100.00 | Apex floor -2500 | Topstep floor -2000 | feed ES:stale NQ:ok | ES: feed stale (no completed bars t"
+   ],
+   [
+    true,
+    "run-level: healthy symbol still trades while the stale one is flagged",
+    ""
+   ],
+   [
+    true,
+    "fallback entry booked at the newest completed close 6034.00",
+    "(6034.0, 'last_completed_close')"
+   ],
+   [
+    true,
+    "fallback method carried into the journal row",
+    "{'mode': 'live', 'trade_id': '2026-11-06_ES_01', 'ts': '2026-11-06T13:00:00-05:00', 'sym': 'ES', 'side': 'short', 'contracts': '2', 'signal_px': '6036.11', 'signal_ts': '2026-11-06 12:00:00-05:00', 'entry_px': '6034.0', 'entry_ts': '2026-11-06T13:20:00-05:00', 'exit_ts': '2026-11-06T13:00:00-05:00', 'exit_px': '6087.27', 'reason': 'stop', 'fill_method': 'last_completed_close', 'exec_lag_min': '20', 'gross_usd': '-532.67', 'costs_usd': '4.9', 'net_usd': '-537.57', 'cum_eq': '-537.57'}"
+   ]
+  ]
+ },
+ "B12 strategy parameters preserved": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "P == researched config",
+    "{'k': 2.0, 'stop_k': 1.2, 'trend': 0.006, 'max_trades': 3, 'cutoff_h': 14, 'base_c': 2, 'scaled_c': 4, 'scale_level': 1500.0, 'dstop': 400.0, 'dll': 1000.0}"
+   ],
+   [
+    true,
+    "backtest VWAPFD variant-1 constants match engine (02_backtest.py L192)",
+    ""
+   ],
+   [
+    true,
+    "SPEC matches research Table 2 (dpp/tick/comm/slip)",
+    "{'ES': {'yh': 'ES=F', 'dpp': 5.0, 'tick_usd': 1.25, 'comm': 0.6, 'slip': 0.5}, 'NQ': {'yh': 'NQ=F', 'dpp': 2.0, 'tick_usd': 0.5, 'comm': 0.6, 'slip': 0.5}}"
+   ],
+   [
+    true,
+    "round-turn friction: MES $2.45, MNQ $1.70 per micro (Table 2)",
+    ""
+   ],
+   [
+    true,
+    "Topstep overlay: $2,000 EOD trail, 55% consistency, 2 min-days, $149/$49",
+    "{'name': 'Topstep 50K', 'dd': 2000.0, 'eval_fee': 49.0, 'act': 149.0, 'min_days': 2, 'consistency': 0.55, 'floor_cap_be': True}"
+   ],
+   [
+    true,
+    "Apex overlay: $2,500 EOD trail, no consistency, 7 min-days, $99/$33",
+    "{'name': 'Apex 50K', 'dd': 2500.0, 'eval_fee': 33.0, 'act': 99.0, 'min_days': 7, 'consistency': None, 'floor_cap_be': False}"
+   ],
+   [
+    true,
+    "journal schema carries the P0.2/P1.1 fields (19 columns)",
+    "['mode', 'trade_id', 'ts', 'sym', 'side', 'contracts', 'signal_px', 'signal_ts', 'entry_px', 'entry_ts', 'exit_ts', 'exit_px', 'reason', 'fill_method', 'exec_lag_min', 'gross_usd', 'costs_usd', 'net_usd', 'cum_eq']"
+   ],
+   [
+    true,
+    "retention/freshness constants: 200-key history, 40-min freshness, 100-min stale line",
+    ""
+   ]
+  ]
+ },
+ "B13 replay equivalence vs archive + auditor simulator": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "engine --replay 5 exits 0",
+    ""
+   ],
+   [
+    true,
+    "engine replay reproduces all 8 audit-recorded trades (count)",
+    "(8, 8)"
+   ],
+   [
+    true,
+    "engine replay == archived trades field-by-field (sym/side/entry/exit/reason)",
+    "[]"
+   ],
+   [
+    true,
+    "engine replay == archived trades net P&L to the cent",
+    ""
+   ],
+   [
+    true,
+    "engine replay final cumulative equity == archived final cum_eq",
+    "('279.54', '279.54')"
+   ],
+   [
+    true,
+    "auditor's OWN simulator reproduces the same 8 trades (count)",
+    "8"
+   ],
+   [
+    true,
+    "auditor's simulator == engine replay (entry/exit/reason, order preserved)",
+    "[]"
+   ],
+   [
+    true,
+    "auditor's simulator == engine replay (net P&L to the cent)",
+    ""
+   ],
+   [
+    true,
+    "simulator final cum == engine replay final cum_eq",
+    "(279.5411509376688, '279.54')"
+   ]
+  ]
+ },
+ "B14 new-defect probes": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "(a) FIXED (N3): crash in the eod window no longer duplicates the DAY SUMMARY block",
+    "1"
+   ],
+   [
+    true,
+    "(a) accounting recovers single-count (tdays 1, trading_days 1, 1 equity row)",
+    "(1, 1, 1)"
+   ],
+   [
+    true,
+    "(b) FIXED (N2): eod day P&L shows today's +$200.00 (yesterday's -300 filtered out)",
+    "**DAY SUMMARY 2026-11-06** \u2014 trades: 1, day P&L: $+200.00, cumulative: $+0.00 (+0% of $3,000 target) Topstep 50K: profit"
+   ],
+   [
+    true,
+    "(b) tdays/trading_days count the real ES trading day",
+    "(1, 1)"
+   ],
+   [
+    true,
+    "(b) best_day tracks today's true P&L (+200)",
+    "200.0"
+   ],
+   [
+    true,
+    "(c) setup: best_day tracked at EOD = +$1,700",
+    "1700.0"
+   ],
+   [
+    true,
+    "(c) PASS gate REMAINS STRICT: an over-cap day blocks the attempt's PASS even at +$5,000 (N1's entry gate now prevents FRESH over-cap days; an open position riding over is reported truthfully, never truncated)",
+    "(True, True)"
+   ]
+  ]
+ },
+ "B15 live home untouched (hash proof)": {
+  "status": "PASS",
+  "items": [
+   [
+    true,
+    "--status on the REAL home is read-only (all four files hash-unchanged)",
+    "PAPER STATUS (started 2026-11-04): cum $+0.00 across 0 closed trades / 0 entries, 0 trading days\n  feed: {}\n  Topstep 50K: +0/3000 to target, floor -2000, 0 tda"
+   ],
+   [
+    true,
+    "real home journal still header-only (0 live trades)",
+    ""
+   ],
+   [
+    true,
+    "real home state: schema v2, cum 0, no halt, no replay contamination",
+    "(2, 0.0)"
+   ]
+  ]
+ },
+ "__meta__": {
+  "status": "INFO",
+  "items": [
+   [
+    true,
+    "bench",
+    "fresh post-remediation audit bench (second auditor)"
+   ],
+   [
+    true,
+    "engine",
+    "scripts/paper_step.py v2 (schema v2)"
+   ],
+   [
+    true,
+    "workspace",
+    "/home/z/my-project/audit_workspace/post_audit"
+   ],
+   [
+    true,
+    "live home touched?",
+    "read-only --status only, hash-verified"
+   ]
+  ]
+ }
+}

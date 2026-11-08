@@ -1,0 +1,57 @@
+# VWAP Fade paper-trading system — post-audit fixes (N1–N5) + 10-session paper run launch
+
+**Stage:** fix stage approved by the user ("Fix all the remaining small fixes and then proceed with 10 sessions paper trading") following the fresh independent audit (`reports/vwap_fade_post_remediation_audit.md`, verdict: ACCEPT the remediation, findings N1–N5 + cosmetic items).
+**Date:** 5 November 2026, ~00:00–01:30 ET (before the session-1 open).
+**Engine:** `scripts/paper_step.py` v2.1 (v2 + post-audit fixes). Pre-fix backup: `fixes_workspace/paper_step_pre_fixes.py.bak` (and `remediate_data_pre_fixes.py.bak`).
+**Strategy:** VWAP Fade v1 parameters remain **frozen** — k=2.0, stop_k=1.2, trend 0.006, max 3 trades/day/symbol, 12:00/13:00 entry bars, 2→4 micros sizing ladder, $400 daily stop, $0.60/side + 0.5 tick/side costs. Nothing in the signal math, windows, sizing or costs was touched (re-verified by the parameters group of both earlier suites).
+**Production safety:** the live Tradovate evaluation account and NT8 bridge (production PropBot) were never approached — this sandbox has no connectivity to Tradovate/NT8, holds no production credentials and has no order-routing capability. The live paper home (`download/paper_trading/`) was touched only read-only; every engine write during testing was redirected to isolated homes under `fixes_workspace/`. Cron job #503762 (the paper-trading poll) was verified read-only and not modified.
+
+---
+
+## 1. What was fixed
+
+**N1 (MEDIUM) — research's bot-side daily profit cap.** Research Table 8 defines the bot layer's daily profit cap as "min(day P&L, firm consistency cap)" — e.g. **$1,650.00 = round(0.55 × $3,000)** on Topstep 50K — and §7 says the firm's "55%-of-target consistency ceiling that our bot's own daily profit caps respect automatically". The engine now implements it exactly like the audited daily-loss stop (P0.1 triple gate):
+
+* `consistency_cap_usd(st)` — the strictest cap among **active** consistency-capped overlays (Topstep $1,650; Apex has none; a passed overlay stops constraining);
+* `check_daily_cap(st, d, sym)` — fires after every close (day P&L only changes on closes), sets persisted `cap_blocked_date`/`cap_blocked_reason` in state plus per-day-entry flags and a `**DAILY PROFIT CAP …**` diary line;
+* `cap_allows_entry(st, date)` — entry gate: the persisted flag **or** the live account-day P&L ≥ cap blocks all further entries for the day, on any symbol; a restart cannot re-enter past the cap; the flag is inert on the next trading day.
+
+Design decision (documented in code): the overlay **PASS gate stays strict and truthful** — `best_day` records the real closed day P&L and a day ending ≥ $1,650 still blocks the PASS with the existing explicit message. The engine does **not** silently truncate realized P&L the way the Monte-Carlo simulator could (a live bot cannot un-realize money). Residual tail (accepted, disclosed): an *already-open* position can ride a day from below the cap to at/above it — fresh entries are what the gate prevents; such a day is reported truthfully and makes the attempt unpassable, exactly as the real firm rule would.
+
+**N2 (MEDIUM) — day-scoped accounting.** Day P&L, today's trade count, `traded_today`, the Topstep DLL message and the EOD summary are now computed over day entries **dated the poll date only** (`overlay_update(..., date=...)`, date-filtered `eod_summary`, date-filtered `traded_today` fallback and per-bar marking). A one-symbol feed outage (yesterday's day entry with realized P&L and/or an open position lingering) can no longer pollute today's EOD P&L (the audit's −$100 vs +$200 case) or inflate `tdays`/`trading_days` toward the minimum-days requirement. The replay path passes no date (its `st["day"]` holds exactly one day) — replay semantics are bit-for-bit preserved.
+
+**N3 (LOW) — idempotent EOD diary write.** `eod_summary` now checks for today's `**DAY SUMMARY <date>**` marker in the diary before writing; a crash between the direct diary write and the end-of-run state save no longer duplicates the block on the recovery run. Accounting still recovers single-count (state mutations and the equity row ride the atomic state save; a crashed attempt never reached it, so the recovery run re-applies them exactly once).
+
+**N4 (LOW) — real replay abort guard.** The tautological guard is replaced by a reachable one: `run_replay` refuses to run if any would-be replay file path (state/journal/equity/diary/lock under the replay dir) collides with a live file path under `realpath`, or if the replay directory itself resolves onto the live root. With the stock `replay_dir_for` the collision is structurally impossible; the guard now *fires* if that invariant is ever broken (verified by fault injection).
+
+**N5 (LOW) — `remediate_data.py` re-run safety.** Every destructive step is guarded: the pre-remediation archive is **never overwritten** (a complete archive short-circuits step 1 with an explicit notice), the journal rewrite is skipped when the header is already the v2 schema, the diary restart only runs on a v1-era diary, and the zero-trade assertions apply only on a first run. Paths are env-overridable (`REM_HOME`, `REM_BACKUP`, `REM_ARCHIVE`, `REM_TODAY`) for isolated testing; defaults are unchanged.
+
+**Bonus engine fix (found by the fix bench):** `open_pnl` crashed with `TypeError` when an open position had never been marked (`mark_px=None` seeded by `new_day`, e.g. feed outage) because the guard's `or`-truthiness check passed but the lookup returned the existing `None` value. Now an explicit `None` cascade falls through to `last_close`. Latent in v2 (production polls always mark at entry), fixed defensively.
+
+**Cosmetic items:** journal clock semantics documented at `JOURNAL_COLS` (in live mode `entry_ts` = acting poll time, `exit_ts` = exiting bar's stamp — different clocks by design; replay uses bar-clock for both); the unreachable "no fresh observable price" branch is now commented as defence-in-depth (verified unreachable through `run_live`); `load_state(today=...)` prunes stale day entries against the **poll date** instead of the wall clock, removing the test-environment pruning artifact the fresh audit noted.
+
+## 2. Verification (all evidence on disk)
+
+**New bench — `scripts/fixver_tests.py` + `scripts/fix_scen.py` / `fix_w_poll.py` / `fix_w_gate.py`** (isolated homes under `fixes_workspace/`, fresh crafted numbers, independent VWAP/σ math; results: `fixes_workspace/fixver_results.json`): **7/7 groups, 68/68 assertions PASS.**
+
+* **F1 (N1 organic):** a real ES short (entry at the observable 6220.00, band 6139.72 recorded separately) closes at target for **+$1,772.88**, pushing the day past $1,650 → cap fires in the same `bar_step`, persisted flag set, diary announces it; the **NQ signal offered in the same poll is blocked** (account level); no further entries that day; EOD summary carries the cap line; `best_day` tracked truthfully and the PASS gate blocks the attempt; the **next trading day entries re-open** (stale flag inert). Cold-reload differential gates (identical bars): flag deleted → blocked by the live condition; flag alone → blocked at day P&L $1,000; stale past-day flag → entry allowed; Topstep passed (Apex-only) → no cap.
+* **F2 (N2):** outage day shows **+$200.00** (not −$100.00); `trading_days`/`tdays` = 1 for a real trading day; a zero-trade day shows **trades: 0, day P&L $+0.00** and does **not** increment `tdays`/`trading_days`; replay's unfiltered semantics preserved (best_day 300 case).
+* **F3 (N3):** crash-in-EOD-window + recovery → **exactly one** DAY SUMMARY block, one equity row, tdays/trading_days single-count.
+* **F4 (N4):** broken path resolver → `ABORT`, **zero writes** (hash-proven); normal replay unaffected.
+* **F5 (N5):** re-run on a byte-identical copy of the real home → exit 0, archive **byte-identical**, journal/diary untouched, skips reported; first-run path on a copy of the real v1 backup still remediates fully; a second run on that home also preserves the archive.
+* **F6:** cosmetic items verified (docs present; `load_state(today=...)` prunes against the caller's date in both directions).
+* **F7 regression:** the **remediator's 16-test suite passes 16/16** (`remediation_workspace/remediation_test_results.json`) and the **post-audit bench passes 15/15 groups** (`audit_workspace/post_audit/post_audit_results.json`) — including the three-way replay equivalence: the v2.1 engine's replay of the stored sessions, the eight v1-era archived trades and the auditor's independent simulator still agree **to the cent** (final cum $279.54), proving the signal engine is unchanged.
+
+**Post-audit bench B14 updated by this stage** (documented in the bench header): the three probes that originally *demonstrated* N1/N2/N3 now assert the fixed behaviours (one block, +$200 day, strict PASS gate). No other suite file was changed. `remediate_data.py` was exercised only on **copies**; the real archive was never at risk.
+
+## 3. The 10-session paper-trading test (now running)
+
+* **Definition:** 10 ET trading days with the v2.1 engine polling every 20 minutes (cron #503762, unchanged, next run 10:00 ET today): **Thu Nov 5, Fri Nov 6, Mon Nov 9, Tue Nov 10, Wed Nov 11, Thu Nov 12, Fri Nov 13, Mon Nov 16, Tue Nov 17, Wed Nov 18 (2026)**. The engine takes over automatically — no manual run was made against the live home.
+* **Daily reporting (new, read-only):** job #504642 "Paper10 daily session summary", 17:10 ET Mon–Fri, runs `scripts/paper10_daily.py` — extracts the day's polls/trades/day P&L/overlays from the live journal (read-only, hash-verified), writes `reports/paper10/session_<date>.json` and the ledger `reports/paper10_sessions.md`, and flags missed sessions.
+* **Final report:** job #504644 "Paper10 final 10-session report", one-time Wed **Nov 18, 17:15 ET**, runs `scripts/paper10_final.py` → `reports/vwap_fade_paper10_report.md` (+ copy in `download/reports/`): coverage vs the 10-session target, executable win%/avg win/loss, day P&L distribution vs the −$400 stop and +$1,650 cap, cost tally, halt/cap events, overlay paths. If fewer than 10 sessions completed (outage/holiday), it reports the gap explicitly instead of pretending.
+* **Both reporting scripts were tested** against a synthetic multi-session home (correct trades, wins, costs, deduped ledger) and hash-verified read-only against the real home.
+* **Known carried limitations (unchanged, disclosed by the earlier reports):** Topstep $1,000 DLL remains message-only (the −$400 stop sits inside it); no contract-roll guard (December roll); missing-15:00-bar `eod_missed` close semantics; per-trade stop/target/σ only in the diary; EOD summary depends on a ≥16:00 poll; Apex 30-day window/monthly rebills not modeled; Yahoo fills are delayed/indicative (`fill_method` tags preserve the distinction). H5 same-bar re-entry is deliberate strategy behaviour (frozen).
+
+## 4. Verdict
+
+All five residual findings from the fresh audit are fixed and independently verified (68/68 new assertions; 16/16 and 15/15 regression suites; signal engine unchanged to the cent). The 10-session paper-trading test is **started**: session 1 begins at the 10:00 ET poll on Thursday, November 5, 2026, with daily summaries at 17:10 ET and the final report scheduled after session 10. Per the standing instruction this stage stops here — the results will be presented when the scheduled reports run.

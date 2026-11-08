@@ -1,0 +1,99 @@
+{
+ "schema_version": 2,
+ "cum": -537.5662494783522,
+ "n_trades": 1,
+ "n_entries": 2,
+ "trading_days": 0,
+ "traded_today": true,
+ "today": "2026-11-09",
+ "day": {
+  "ES": {
+   "date": "2026-11-09",
+   "vwap_n": 17842000.0,
+   "vwap_d": 3000.0,
+   "devs": [
+    0.0,
+    60.0,
+    86.66666666666697
+   ],
+   "day_open": 6000.0,
+   "trades": 1,
+   "pos": {
+    "side": -1,
+    "entry_px": 6044.0,
+    "stop_px": 6097.266624947835,
+    "tp_px": 5947.333333333333,
+    "signal_px": 6036.111041579725,
+    "signal_ts": "2026-11-09 12:00:00-05:00",
+    "entry_ts": "2026-11-09 13:20:00-05:00",
+    "entry_exec_ts": "2026-11-09 13:20:00-05:00",
+    "contracts": 2,
+    "fill_method": "poll_quote",
+    "exec_lag_min": 20,
+    "trade_id": "2026-11-09_ES_01"
+   },
+   "day_realized": 0.0,
+   "halted": false,
+   "halted_reason": null,
+   "last_close": 6034.0,
+   "last_ts": "2026-11-09 12:00:00-05:00",
+   "mark_px": 6044.0
+  }
+ },
+ "done_bars": {
+  "ES": [
+   "2026-11-06T10:00:00-05:00",
+   "2026-11-06T11:00:00-05:00",
+   "2026-11-06T12:00:00-05:00",
+   "2026-11-06T13:00:00-05:00",
+   "2026-11-09T10:00:00-05:00",
+   "2026-11-09T11:00:00-05:00",
+   "2026-11-09T12:00:00-05:00"
+  ],
+  "NQ": [
+   "2026-11-06T10:00:00-05:00",
+   "2026-11-06T11:00:00-05:00",
+   "2026-11-06T13:00:00-05:00"
+  ]
+ },
+ "rejected_bars": {
+  "ES": [],
+  "NQ": []
+ },
+ "last_bar_ts": {
+  "ES": "2026-11-09T12:00:00-05:00",
+  "NQ": "2026-11-06T13:00:00-05:00"
+ },
+ "feed_status": {
+  "ES": "ok",
+  "NQ": "unavailable"
+ },
+ "halted_date": "2026-11-06",
+ "halted_reason": "account day P&L -537.57 breached the -$400 daily stop",
+ "cap_blocked_date": null,
+ "cap_blocked_reason": null,
+ "last_summary": null,
+ "started": "2026-11-05T00:18:56.265995-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 0.0,
+   "floor": -2000.0,
+   "tdays": 0,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 0.0,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 0.0,
+   "floor": -2500.0,
+   "tdays": 0,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 0.0,
+   "start": "2026-11-05"
+  }
+ }
+}

@@ -1,0 +1,11 @@
+- `replay` 11-02 12:00 ET **ES 2 micro LONG opened** @ 7643.28 (stop 7634.54, target 7657.85, sd 7.29, id 2026-11-02_ES_01)
+- `replay` 11-02 12:00 ET **ES 2 micro LONG closed (stop)** 7643.28 -> 7634.54 = $-92.33 (day -92.33, cum $-92.33)
+- `replay` 11-02 13:00 ET **ES 2 micro LONG opened** @ 7634.10 (stop 7622.76, target 7653.01, sd 9.45, id 2026-11-02_ES_02)
+- `replay` 11-02 14:00 ET **ES 2 micro LONG closed (stop)** 7634.10 -> 7622.76 = $-118.33 (day -210.65, cum $-210.65)
+- `replay` 11-02 12:00 ET **NQ 2 micro LONG opened** @ 28593.12 (stop 28540.49, target 28680.82, sd 43.85, id 2026-11-02_NQ_01)
+- `replay` 11-02 12:00 ET **NQ 2 micro LONG closed (stop)** 28593.12 -> 28540.49 = $-213.90 (day -213.90, cum $-424.55)
+**DAILY STOP 2026-11-02: account day P&L -424.55 breached the -$400 daily stop — no further entries on any symbol until the next trading day (sym NQ closed a trade)**
+- `replay` 11-03 13:00 ET **ES 2 micro SHORT opened** @ 7617.19 (stop 7622.71, target 7607.99, sd 4.60, id 2026-11-03_ES_01)
+- `replay` 11-03 13:00 ET **ES 2 micro SHORT closed (stop)** 7617.19 -> 7622.71 = $-60.10 (day -60.10, cum $-484.65)
+- `replay` 11-03 13:00 ET **NQ 2 micro SHORT opened** @ 28417.24 (stop 28446.39, target 28368.66, sd 24.29, id 2026-11-03_NQ_01)
+- `replay` 11-03 13:00 ET **NQ 2 micro SHORT closed (tp)** 28417.24 -> 28368.66 = $+190.91 (day +190.91, cum $-293.74)

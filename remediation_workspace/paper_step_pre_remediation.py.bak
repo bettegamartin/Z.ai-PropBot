@@ -1,0 +1,429 @@
+"""Live paper-trading harness for the VWAP-fade system (the stress-test winner).
+
+System under test (exact backtest rules, 02_backtest.py VWAPFD variant 1):
+  * Session VWAP from the 10:00 ET bar; sigma = std(close - vwap) expanding.
+  * SHORT when bar High >= vwap + 2.0*sigma  -> entry max(band, open),
+    stop = entry + 1.2*sigma, target = vwap.
+  * LONG symmetric on vwap - 2.0*sigma.
+  * Entry windows: bars stamped 12:00 / 13:00 ET only (backtest entry_cutoff 14).
+    Max 3 trades/day/symbol, one position per symbol, trend filter
+    (|close - day_open| <= 0.6%), flat by 16:00 ET.
+  * Executor: stop checked before target; target needs 1-tick trade-through;
+    costs = $0.60/side + 0.5 tick slippage per side.
+  * Sizing: 2 micros MES + 2 micros MNQ; scale to 4 after +$1,500 cumulative
+    (50% of the $3,000 target); daily stop: no new entries after -$400 day.
+
+Hypothetical prop overlays tracked on the same equity line:
+  Topstep 50K (EOD-trail $2,000 MLL, +$3,000 target, DLL $1,000)
+  Apex 50K    (intraday-trail $2,500, +$3,000 target)
+
+Modes:
+  --live        poll Yahoo 1h bars, process new closed bars, update state/logs
+  --replay N    smoke test: run last N stored RTH sessions through same engine
+  --status      print current paper state
+State: /home/z/my-project/download/paper_trading/
+"""
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pandas as pd
+
+ET = ZoneInfo("America/New_York")
+DATA = "/home/z/my-project/download/data"
+OUT = "/home/z/my-project/download/paper_trading"
+STATE_F = f"{OUT}/state.json"
+TRADES_F = f"{OUT}/trades.csv"
+EQUITY_F = f"{OUT}/equity.csv"
+LOG_F = f"{OUT}/log.md"
+
+SPEC = {"ES": dict(yh="ES=F", dpp=5.0, tick_usd=1.25, comm=0.60, slip=0.5),
+        "NQ": dict(yh="NQ=F", dpp=2.0, tick_usd=0.50, comm=0.60, slip=0.5)}
+P = dict(k=2.0, stop_k=1.2, trend=0.006, max_trades=3, cutoff_h=14,
+         base_c=2, scaled_c=4, scale_level=1500.0, dstop=400.0, dll=1000.0)
+TARGET = 3000.0
+OVERLAYS = {
+    "topstep": dict(name="Topstep 50K", dd=2000.0, eval_fee=49.0, act=149.0, min_days=2),
+    "apex": dict(name="Apex 50K", dd=2500.0, eval_fee=33.0, act=99.0, min_days=7),
+}
+UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+
+
+# ---------------- io helpers ----------------
+
+def atomic_json(path, obj):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=1, default=str)
+    os.replace(tmp, path)
+
+def append_csv(path, row, cols):
+    os.makedirs(OUT, exist_ok=True)
+    new = not os.path.exists(path)
+    with open(path, "a") as fh:
+        if new:
+            fh.write(",".join(cols) + "\n")
+        fh.write(",".join(str(row.get(c, "")) for c in cols) + "\n")
+
+def logline(msg):
+    with open(LOG_F, "a") as fh:
+        fh.write(f"- {msg}\n")
+
+
+# ---------------- data ----------------
+
+def fetch_1h(yh):
+    """Yahoo 1h bars -> DataFrame(O,H,L,C,V) tz ET, RTH-complete bars only."""
+    for host in ("query1", "query2"):
+        url = (f"https://{host}.finance.yahoo.com/v8/finance/chart/{yh}"
+               f"?range=5d&interval=1h")
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                js = json.load(r)
+            res = js["chart"]["result"][0]
+            ts = res.get("timestamp") or []
+            q = res["indicators"]["quote"][0]
+            rows = []
+            for i, t in enumerate(ts):
+                o, h, l, c, v = (q[k][i] for k in ("open", "high", "low", "close", "volume"))
+                if None in (o, h, l, c) or not v:
+                    continue
+                dt = datetime.fromtimestamp(t, tz=ZoneInfo("UTC")).astimezone(ET)
+                rows.append((dt, float(o), float(h), float(l), float(c), float(v)))
+            if not rows:
+                continue
+            df = pd.DataFrame(rows, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
+            df = df.set_index("ts").sort_index()
+            df = df.between_time("10:00", "15:59")          # clean RTH bars
+            now = datetime.now(ET)
+            df = df[[t + timedelta(hours=1) <= now - timedelta(seconds=90)
+                     for t in df.index]]                     # completed bars only
+            return df
+        except Exception:
+            continue
+    return None
+
+def replay_bars(sym, n_days):
+    """Last n stored RTH sessions (>=5 bars) from the research data, sequential."""
+    df = pd.read_csv(f"{DATA}/{sym.lower()}_1h.csv", index_col=0)
+    df.index = pd.to_datetime(df.index, utc=True).tz_convert(ET)
+    rth = df.between_time("10:00", "15:59")
+    rth = rth[rth["Volume"] > 0]
+    days = [g for _, g in rth.groupby(rth.index.normalize()) if len(g) >= 5]
+    return days[-n_days:]
+
+
+# ---------------- engine ----------------
+
+def new_day(date):
+    return dict(date=date, vwap_n=0.0, vwap_d=0.0, devs=[], day_open=None,
+                trades=0, pos=None, day_realized=0.0, halted=False, last_close=None)
+
+def open_pos(d):
+    return d["pos"] is not None
+
+def close_pos(d, px, ts, reason, sym, st, mode):
+    pos = d["pos"]
+    if not isinstance(ts, datetime):
+        ts = datetime.fromisoformat(str(ts))
+    ets = pos["entry_ts"] if isinstance(pos["entry_ts"], datetime) \
+        else datetime.fromisoformat(str(pos["entry_ts"]))
+    spec = SPEC[sym]
+    per_ct = (px - pos["entry_px"]) * pos["side"] * spec["dpp"]
+    costs = (spec["comm"] * 2 + spec["slip"] * spec["tick_usd"] * 2) * pos["contracts"]
+    net = per_ct * pos["contracts"] - costs
+    d["day_realized"] += net
+    st["cum"] += net
+    st["n_trades"] += 1
+    append_csv(TRADES_F, dict(
+        mode=mode, ts=ts.isoformat(), sym=sym,
+        side="long" if pos["side"] > 0 else "short",
+        contracts=pos["contracts"], entry_px=round(pos["entry_px"], 2),
+        entry_ts=ets.isoformat(), exit_ts=ts.isoformat(),
+        exit_px=round(px, 2), reason=reason, gross_usd=round(per_ct * pos["contracts"], 2),
+        costs_usd=round(costs, 2), net_usd=round(net, 2), cum_eq=round(st["cum"], 2)),
+        ["mode", "ts", "sym", "side", "contracts", "entry_px", "entry_ts",
+         "exit_ts", "exit_px", "reason", "gross_usd", "costs_usd", "net_usd", "cum_eq"])
+    logline(f"`{mode}` {ts:%m-%d %H:%M} ET **{sym} {pos['contracts']} micro "
+            f"{'LONG' if pos['side'] > 0 else 'SHORT'} closed ({reason})** "
+            f"{pos['entry_px']:.2f} -> {px:.2f} = ${net:+.2f} (day {d['day_realized']:+.2f}, cum ${st['cum']:+.2f})")
+    d["pos"] = None
+    return net
+
+def contracts_for(st):
+    return P["scaled_c"] if st["cum"] >= P["scale_level"] else P["base_c"]
+
+def bar_step(sym, bar, st, mode, now_ts=None):
+    o, h, l, c, v, ts = bar
+    spec = SPEC[sym]
+    if sym not in st["day"] or st["day"][sym]["date"] != ts.date().isoformat():
+        prev = st["day"].get(sym)
+        if prev and prev.get("pos"):
+            close_pos(prev, prev["last_close"], prev["last_ts"], "eod_missed", sym, st, mode)
+        st["day"][sym] = new_day(ts.date().isoformat())
+    d = st["day"][sym]
+    if d["day_open"] is None:
+        d["day_open"] = o
+    # session VWAP + expanding sigma (includes current bar, as in backtest)
+    d["vwap_n"] += (h + l + c) / 3 * v
+    d["vwap_d"] += v
+    vwap = d["vwap_n"] / max(d["vwap_d"], 1e-9)
+    devs = d["devs"] + [c - vwap]
+    sd = float(np.std(devs, ddof=1)) if len(devs) >= 2 else 0.0
+    d["last_close"] = c
+    d["last_ts"] = ts
+    tick = 0.25
+
+    # 1) exits on an open position: stop first, then target (trade-through)
+    if open_pos(d):
+        pos = d["pos"]
+        if pos["side"] > 0 and l <= pos["stop_px"]:
+            close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+        elif pos["side"] < 0 and h >= pos["stop_px"]:
+            close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+        elif pos["side"] > 0 and h >= pos["tp_px"] + tick:
+            close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+        elif pos["side"] < 0 and l <= pos["tp_px"] - tick:
+            close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+
+    # 2) entries: bars stamped 12:00/13:00 ET (i>=2, hour<14), fresh bar only
+    if (not open_pos(d) and len(devs) >= 3 and ts.hour < P["cutoff_h"]
+            and d["trades"] < P["max_trades"] and not d["halted"]):
+        fresh = now_ts is None or (ts + timedelta(hours=1)) >= now_ts - timedelta(minutes=40)
+        if fresh and abs(c - d["day_open"]) <= P["trend"] * d["day_open"] and sd > 0:
+            up, dn = vwap + P["k"] * sd, vwap - P["k"] * sd
+            n = contracts_for(st)
+            pos = None
+            if h >= up:
+                pos = dict(side=-1, entry_px=max(up, o), stop_px=max(up, o) + P["stop_k"] * sd,
+                           tp_px=vwap, entry_ts=ts, contracts=n)
+            elif l <= dn:
+                pos = dict(side=1, entry_px=min(dn, o), stop_px=min(dn, o) - P["stop_k"] * sd,
+                           tp_px=vwap, entry_ts=ts, contracts=n)
+            if pos:
+                d["pos"] = pos
+                d["trades"] += 1
+                st["n_entries"] += 1
+                logline(f"`{mode}` {ts:%m-%d %H:%M} ET **{sym} {n} micro "
+                        f"{'SHORT' if pos['side'] < 0 else 'LONG'} opened** @ {pos['entry_px']:.2f} "
+                        f"(stop {pos['stop_px']:.2f}, target {pos['tp_px']:.2f}, sd {sd:.2f})")
+                # same-bar stop/target (replicates backtest executor)
+                if pos["side"] < 0 and h >= pos["stop_px"]:
+                    close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+                elif pos["side"] > 0 and l <= pos["stop_px"]:
+                    close_pos(d, pos["stop_px"], ts, "stop", sym, st, mode)
+                elif pos["side"] < 0 and l <= pos["tp_px"] - tick:
+                    close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+                elif pos["side"] > 0 and h >= pos["tp_px"] + tick:
+                    close_pos(d, pos["tp_px"], ts, "tp", sym, st, mode)
+
+    # 3) EOD flat on the 15:00-16:00 bar (or any late bar at day end)
+    if open_pos(d) and ts.hour == 15:
+        close_pos(d, c, ts, "eod", sym, st, mode)
+
+    d["devs"] = devs
+    return d
+
+def open_pnl(st):
+    tot = 0.0
+    for sym, d in st["day"].items():
+        if d and d.get("pos") and d.get("last_close") is not None:
+            spec = SPEC[sym]
+            pos = d["pos"]
+            tot += (d["last_close"] - pos["entry_px"]) * pos["side"] * spec["dpp"] * pos["contracts"]
+    return tot
+
+def overlay_update(st, eod=False):
+    now = datetime.now(ET)
+    eq = st["cum"] + open_pnl(st)
+    day_pnl = sum(d["day_realized"] for d in st["day"].values() if d)
+    msgs = []
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            continue
+        oeq = eq - ov["base_cum"]
+        kind = "intraday" if key == "apex" else "eod"
+        if kind == "intraday":
+            ov["hwm"] = max(ov["hwm"], oeq)
+            ov["floor"] = min(ov["hwm"] - cfg["dd"], 0.0)
+        else:
+            ov["floor"] = min(ov["hwm_eod"] - cfg["dd"], 0.0)
+        if oeq <= ov["floor"]:
+            ov["fees"] += cfg["eval_fee"]
+            ov["attempts"] += 1
+            logline(f"**{cfg['name']} overlay: WOULD BE BUSTED** {now:%m-%d %H:%M} ET "
+                    f"(eq {oeq:+.0f} vs floor {ov['floor']:+.0f}). New attempt, "
+                    f"fees so far ${ov['fees']:.0f}, attempts {ov['attempts']}")
+            ov.update(base_cum=st["cum"], hwm=0.0, hwm_eod=0.0, floor=-cfg["dd"],
+                      tdays=0, start=now.date().isoformat())
+            continue
+        if day_pnl <= -P["dll"] and key == "topstep" and not ov.get("dll_today") == st["today"]:
+            ov["dll_today"] = st["today"]
+            msgs.append(f"Topstep DLL ${-P['dll']:.0f} hit (day {day_pnl:+.0f}) -> would flatten for the day")
+        if eod and st["traded_today"]:
+            ov["tdays"] += 1
+            ov["hwm_eod"] = max(ov["hwm_eod"], st["cum"] - ov["base_cum"])
+        ocum = st["cum"] - ov["base_cum"]
+        if ocum >= TARGET and ov["tdays"] >= cfg["min_days"]:
+            ov["fees"] += cfg["act"]
+            ov["done"] = True
+            ov["passed_on"] = now.date().isoformat()
+            logline(f"**{cfg['name']} overlay: WOULD HAVE PASSED the evaluation** on "
+                    f"{ov['passed_on']} (profit {ocum:+.0f}, {ov['tdays']} trading days, "
+                    f"eval fees paid ${ov['fees']:.0f}, attempts {ov['attempts']})")
+    st["overlays"] = st["overlays"]
+    return eq, msgs
+
+def eod_summary(st):
+    if st.get("last_summary") == st["today"]:
+        return None
+    st["last_summary"] = st["today"]
+    day_pnl = sum(d["day_realized"] for d in st["day"].values() if d)
+    n_today = sum(d["trades"] for d in st["day"].values() if d)
+    if st["traded_today"]:
+        st["trading_days"] += 1
+    eq, msgs = overlay_update(st, eod=True)
+    lines = [f"**DAY SUMMARY {st['today']}** — trades: {n_today}, day P&L: "
+             f"${day_pnl:+.2f}, cumulative: ${st['cum']:+.2f} "
+             f"({st['cum'] / TARGET * 100:+.0f}% of $3,000 target)"]
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            lines.append(f"- {cfg['name']}: PASSED {ov['passed_on']} (fees ${ov['fees']:.0f})")
+        else:
+            ocum = st["cum"] - ov["base_cum"]
+            lines.append(f"- {cfg['name']}: profit {ocum:+.0f}/{TARGET:.0f}, floor "
+                         f"{ov['floor']:+.0f}, tdays {ov['tdays']}, fees ${ov['fees']:.0f}, "
+                         f"attempts {ov['attempts']}")
+    for m in msgs:
+        lines.append(f"- {m}")
+    with open(LOG_F, "a") as fh:
+        fh.write("\n".join(f"- {x}" if not x.startswith("**") else x for x in lines) + "\n")
+    append_csv(EQUITY_F, dict(ts=datetime.now(ET).isoformat(), eq=round(st["cum"], 2),
+                              day=round(day_pnl, 2)), ["ts", "eq", "day"])
+    return " ".join(lines)
+
+def fresh_state():
+    return dict(cum=0.0, n_trades=0, n_entries=0, trading_days=0, traded_today=False,
+                today=datetime.now(ET).date().isoformat(), day={}, done_bars={},
+                last_summary=None, started=datetime.now(ET).isoformat(),
+                overlays={k: dict(base_cum=0.0, hwm=0.0, hwm_eod=0.0,
+                                  floor=-OVERLAYS[k]["dd"], tdays=0, fees=0.0,
+                                  attempts=1, start=datetime.now(ET).date().isoformat())
+                          for k in OVERLAYS})
+
+
+# ---------------- modes ----------------
+
+def run_live():
+    os.makedirs(OUT, exist_ok=True)
+    st = json.load(open(STATE_F)) if os.path.exists(STATE_F) else fresh_state()
+    now = datetime.now(ET)
+    st["today"] = now.date().isoformat()
+    st["traded_today"] = False
+    if now.weekday() >= 5:
+        print(f"WEEKEND {now:%a %H:%M} ET — market closed, no action.")
+        return
+    acted, notes = False, []
+    for sym in ("ES", "NQ"):
+        df = fetch_1h(SPEC[sym]["yh"])
+        if df is None or df.empty:
+            notes.append(f"{sym}: feed unavailable")
+            continue
+        done = set(st["done_bars"].get(sym, []))
+        for ts, row in df.iterrows():
+            key = ts.isoformat()
+            if key in done:
+                continue
+            d = bar_step(sym, (row["Open"], row["High"], row["Low"], row["Close"],
+                               row["Volume"], ts), st, "live", now_ts=now)
+            done.add(key)
+            acted = True
+            if d["trades"]:
+                st["traded_today"] = True
+        st["done_bars"][sym] = sorted(done)[-12:]
+    if not st["traded_today"]:
+        st["traded_today"] = any(d["trades"] for d in st["day"].values() if d)
+    eq, dllmsgs = overlay_update(st, eod=False)
+    summary = None
+    if now.hour >= 16:
+        summary = eod_summary(st)
+    atomic_json(STATE_F, st)
+    pos_desc = []
+    for sym, d in st["day"].items():
+        if d and d.get("pos"):
+            p = d["pos"]
+            pos_desc.append(f"{sym} {'L' if p['side'] > 0 else 'S'}{p['contracts']}"
+                            f"@{p['entry_px']:.2f}")
+    ov = st["overlays"]
+    ap, ts_ = ov["apex"], ov["topstep"]
+    print(f"LIVE {now:%a %m-%d %H:%M} ET | cum ${st['cum']:+.2f} | open: "
+          f"{', '.join(pos_desc) if pos_desc else 'flat'} | "
+          f"Apex floor {ap['floor']:+.0f} | Topstep floor {ts_['floor']:+.0f} | "
+          f"{' | '.join(notes) if notes else 'feed ok'}")
+    if summary:
+        print(summary)
+
+def run_replay(n):
+    os.makedirs(OUT, exist_ok=True)
+    st = fresh_state()
+    days_all = None
+    print(f"REPLAY of last {n} stored RTH sessions through the paper engine "
+          f"(2 micros/symbol, real costs):\n")
+    day_list = replay_bars("ES", n)
+    dates = [g.index[0].date() for g in day_list]
+    for di, date in enumerate(dates):
+        for sym in ("ES", "NQ"):
+            days = replay_bars(sym, n)
+            for ts, row in days[di].iterrows():
+                d = bar_step(sym, (row["Open"], row["High"], row["Low"], row["Close"],
+                                   row["Volume"], ts), st, "replay")
+        st["traded_today"] = any(d["trades"] for d in st["day"].values() if d)
+        eq, _ = overlay_update(st, eod=True)
+        dp = sum(d["day_realized"] for d in st["day"].values() if d)
+        nt = sum(d["trades"] for d in st["day"].values() if d)
+        print(f"  {date}  trades {nt:2d}  day ${dp:+8.2f}  cum ${st['cum']:+9.2f}  "
+              f"({st['cum'] / TARGET * 100:+5.0f}% of target)")
+        st["day"] = {}
+    ap, ts_ = st["overlays"]["apex"], st["overlays"]["topstep"]
+    print(f"\n  replay totals: {st['n_trades']} closed trades over {n} sessions, "
+          f"cum ${st['cum']:+.2f}")
+    print(f"  Apex overlay: profit {st['cum'] - ap['base_cum']:+.0f}, floor {ap['floor']:+.0f}, "
+          f"tdays {ap['tdays']}, busted {ap['attempts'] - 1}x")
+    print(f"  Topstep overlay: profit {st['cum'] - ts_['base_cum']:+.0f}, floor {ts_['floor']:+.0f}, "
+          f"tdays {ts_['tdays']}, busted {ts_['attempts'] - 1}x")
+    print("\n(replay touches live logs with mode=replay rows; live state untouched)")
+
+def run_status():
+    if not os.path.exists(STATE_F):
+        print("No live state yet — run --live first.")
+        return
+    st = json.load(open(STATE_F))
+    eq, _ = overlay_update(st, eod=False)
+    print(f"PAPER STATUS (started {st['started'][:10]}): cum ${st['cum']:+.2f} across "
+          f"{st['n_trades']} closed trades / {st['n_entries']} entries, "
+          f"{st['trading_days']} trading days")
+    for key, ov in st["overlays"].items():
+        cfg = OVERLAYS[key]
+        if ov.get("done"):
+            print(f"  {cfg['name']}: PASSED on {ov['passed_on']} "
+                  f"(fees ${ov['fees']:.0f}, attempts {ov['attempts']})")
+        else:
+            print(f"  {cfg['name']}: {st['cum'] - ov['base_cum']:+.0f}/{TARGET:.0f} to target, "
+                  f"floor {ov['floor']:+.0f}, {ov['tdays']} tdays, fees ${ov['fees']:.0f}, "
+                  f"attempts {ov['attempts']}")
+
+if __name__ == "__main__":
+    mode = sys.argv[1] if len(sys.argv) > 1 else "--status"
+    if mode == "--live":
+        run_live()
+    elif mode == "--replay":
+        run_replay(int(sys.argv[2]) if len(sys.argv) > 2 else 5)
+    else:
+        run_status()

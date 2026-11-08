@@ -1,0 +1,132 @@
+{
+ "T01 daily stop blocks entries (account level)": {
+  "status": "PASS",
+  "items": [
+   "day P&L after the stop-out: $-497.57 (limit -$400) -> halted_date set to 2026-11-04",
+   "13:00 bar stopped trade #1 AND re-touched the band: engine took NO re-entry (trades=1, pos=None); without the stop this bar re-enters (v1 behaviour)",
+   "account-level: NQ signal bar the same day did NOT open a position (cross-symbol block)",
+   "diary carries the DAILY STOP announcement with the account day P&L",
+   "(reference) signal px of trade #1 was 20111.00; the fill logic itself is T03's subject"
+  ]
+ },
+ "T02 halt persists after restart": {
+  "status": "PASS",
+  "items": [
+   "state saved with halted_date=2026-11-04, cold-reloaded from disk: 12:00 signal bar did NOT open a position",
+   "defence-in-depth: with halted_date deliberately absent, the live day-P&L condition (-$450 <= -$400) still blocks the entry (audit test D scenario, now passing the other way)"
+  ]
+ },
+ "T03 fills at observable price": {
+  "status": "PASS",
+  "items": [
+   "fill booked at the poll's observable price 20150.00 (signal/band price 20111.00 recorded separately, never used as fill)",
+   "stop 20199.27 and target 20028.89 recomputed from the fill; fill_method=poll_quote, entry_ts=13:20, exec_lag_min=20",
+   "observable price already beyond the target at action time -> immediate exit AT THAT price (reason tp_poll), net $-4.90 = friction only (no backdated target profit)",
+   "quote unavailable -> signal NOT taken with an explicit diary note (no entry, no guess)"
+  ]
+ },
+ "T04 signal vs execution recorded apart": {
+  "status": "PASS",
+  "items": [
+   "journal columns include trade_id/signal_px/signal_ts/entry_px/entry_ts/fill_method/exec_lag_min (19 columns)",
+   "row: signal 20111.0 @ 2026-11-04T12:00:00-05:00 (the 12:00 bar) vs execution 20150.0 @ 2026-11-04T13:20:00-05:00 (the acting poll), method=poll_quote, lag=20min, trade_id=2026-11-04_ES_01"
+  ]
+ },
+ "T05 overlapping runs cannot duplicate": {
+  "status": "PASS",
+  "items": [
+   "run holding the flock: second run prints SKIP and writes NOTHING",
+   "overlap replay (pre-run state + post-run journal): journal stays at 1 row(s), trade_ids unique, state n_trades=1 == journal rows",
+   "two concurrent threads: exactly one processed, one SKIPped; journal has 1 unique row"
+  ]
+ },
+ "T06 crash recovery cannot duplicate": {
+  "status": "PASS",
+  "items": [
+   "crash between journal write and state save: row on disk, state absent (crash reproduced)",
+   "recovery run re-processed the same bars, regenerated trade_id 2026-11-04_ES_01 -> dedup kept the journal at exactly 1 row; state n_trades=1 and cum reconcile with the row (NO duplicate)",
+   "malformed truncated tail line: detected, dropped, file repaired in place, valid rows and trade_ids intact"
+  ]
+ },
+ "T07 replay cannot contaminate live": {
+  "status": "PASS",
+  "items": [
+   "--replay 2 wrote ONLY to <home>/replay/ (live trades.csv/state.json absent)",
+   "guard: a replay directory resolving to the live root prints ABORT and runs nothing",
+   "journal rows carry mode=replay and live accounting only ever reads live state",
+   "replay journal: 5 rows, modes=['replay']"
+  ]
+ },
+ "T08 Topstep 55% consistency": {
+  "status": "PASS",
+  "items": [
+   "target reached (ocum $3,300 >= $3,000, tdays 4) with best day $1,800 -> NO pass; message: consistency cap blocks PASS (best day >= $1,650 = 55% of target)",
+   "boundary: best day exactly $1,650 blocks; $1,600 passes and charges the $149 activation (rule: best day < 55% of target, research Table 4/5)",
+   "Apex (no consistency requirement in the spec) passes with a $2,900 best day -- correct omission, not a silent substitution"
+  ]
+ },
+ "T09 Apex EOD trail + Topstep cap + bust": {
+  "status": "PASS",
+  "items": [
+   "intraday equity +$2,900 (open P&L) -> Apex floor UNCHANGED at -$2,500 (v1 trailed to -$600 here)",
+   "after the EOD summary (closed equity $1,000): Apex hwm_eod=$1,000, floor -$1,500; a later intraday spike leaves the floor at -$1,500 (EOD trail per research Table 4)",
+   "Topstep floor capped at breakeven ($0) once hwm_eod-dd >= 0 (research behaviour)",
+   "bust check still uses current equity: eq -$2,600 <= floor -$2,500 -> attempt 2, $33 eval fee, base reset (unchanged, correct)"
+  ]
+ },
+ "T10 old bars cannot rewind state": {
+  "status": "PASS",
+  "items": [
+   "6 stale Nov-2 bars re-offered by a 5-day fetch: all REJECTED (rejected_bars), warned in the status line, accounting untouched (cum $+0.00, entries 0)",
+   "new Nov-5 10:00 bar processed normally: day date 2026-11-05, last_bar_ts 2026-11-05T10:00 -> state moved FORWARD only",
+   "Nov-3 bars already in done_bars were silently deduplicated (normal overlap)"
+  ]
+ },
+ "T11 missing/stale data never healthy": {
+  "status": "PASS",
+  "items": [
+   "empty feed -> status line + state say 'feed unavailable' (never 'ok')",
+   "newest completed bar 140 min old during RTH -> 'feed ES:stale NQ:stale' with the detail 'stale (newest completed bar 140 min old)' in the status line and state",
+   "fresh bars + forming quote -> 'feed ES:ok' (per-symbol health, not masked by the other symbol)",
+   "an expired (>40 min past close) signal bar is never entered (v1 freshness gate preserved)",
+   "engine guard: a fresh signal with NO observable price at the poll is skipped with an explicit diary note (no guessed fill)",
+   "no forming quote but the newest completed close is <= 40 min old -> entry at that close with fill_method=last_completed_close (recorded, distinguishable)"
+  ]
+ },
+ "T12 regression: replay == audit trades": {
+  "status": "PASS",
+  "items": [
+   "isolated replay of the last 5 stored sessions reproduces ALL 8 audit-recorded trades to the cent (entry, exit, reason, order) -> signal/VWAP/sigma/executor math preserved exactly",
+   "the -$400 daily stop did not alter this history: its only breach (Nov-2, -$424.55) happens on the day's final trade, matching v1 behaviour while proving the halt evaluates live",
+   "replay rows carry fill_method=bar_fill (signal performance, kept apart from live)"
+  ]
+ },
+ "T13 regression: stop/target semantics": {
+  "status": "PASS",
+  "items": [
+   "target touch EXACTLY at VWAP does not fill (1-tick trade-through enforced); one tick through fills at the VWAP level",
+   "stop and target both inside one bar -> stop taken first (conservative, matches the research backtest)"
+  ]
+ },
+ "T14 regression: sizing + costs": {
+  "status": "PASS",
+  "items": [
+   "sizing ladder unchanged: 2 micros below +$1,500 cum, 4 micros at/above (50% of target)",
+   "cost model unchanged: $4.90 round turn for 2 MES micros, $3.40 for 2 MNQ micros ($0.60/side commission + 0.5 tick/side slippage)"
+  ]
+ },
+ "T15 regression: rollover resets halt + eod": {
+  "status": "PASS",
+  "items": [
+   "after a -$400+ day the NEXT trading day trades again (halt resets on rollover, trades/day counters reset, day P&L resets)",
+   "EOD liquidation unchanged: position closed on the 15:00 bar at its close (reason=eod), per the shared backtest convention (audit L1 documented)"
+  ]
+ },
+ "T16 regression: dedup + history window": {
+  "status": "PASS",
+  "items": [
+   "catch-up of 240 bars: done_bars retained 200 keys (= MAX_KEY_HIST 200), far above the 5-day fetch window (~30 bars) -> the audit's 12-key prune cannot recur",
+   "identical re-fetch processes nothing new: no new trades, no cum drift, done_bars unchanged (normal dedup intact)"
+  ]
+ }
+}

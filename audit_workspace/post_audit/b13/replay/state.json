@@ -1,0 +1,42 @@
+{
+ "schema_version": 2,
+ "cum": 279.5411509376688,
+ "n_trades": 8,
+ "n_entries": 8,
+ "trading_days": 0,
+ "traded_today": true,
+ "today": "replay",
+ "day": {},
+ "done_bars": {},
+ "rejected_bars": {},
+ "last_bar_ts": {},
+ "feed_status": {},
+ "halted_date": "2026-11-02",
+ "halted_reason": "account day P&L -424.55 breached the -$400 daily stop",
+ "cap_blocked_date": null,
+ "cap_blocked_reason": null,
+ "last_summary": null,
+ "started": "2026-11-05T00:19:24.225677-05:00",
+ "overlays": {
+  "topstep": {
+   "base_cum": 0.0,
+   "hwm_eod": 573.2772769917963,
+   "floor": -1426.7227230082037,
+   "tdays": 4,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 356.59408739055397,
+   "start": "2026-11-05"
+  },
+  "apex": {
+   "base_cum": 0.0,
+   "hwm_eod": 573.2772769917963,
+   "floor": -1926.7227230082037,
+   "tdays": 4,
+   "fees": 0.0,
+   "attempts": 1,
+   "best_day": 356.59408739055397,
+   "start": "2026-11-05"
+  }
+ }
+}

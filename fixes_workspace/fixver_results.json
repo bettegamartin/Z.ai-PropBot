@@ -1,0 +1,388 @@
+{
+ "order": [
+  "F1 N1 bot-side daily profit cap (organic + cold gates)",
+  "F2 N2 day-scoped accounting (outage days + replay regression)",
+  "F3 N3 idempotent EOD diary write",
+  "F4 N4 reachable replay abort guard",
+  "F5 N5 remediate_data re-run safety",
+  "F6 cosmetic items",
+  "F7 regression: both earlier suites"
+ ],
+ "results": {
+  "F1 N1 bot-side daily profit cap (organic + cold gates)": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "P1 poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "P1: SHORT entered at the observable price 6220.00",
+     "6220.0"
+    ],
+    [
+     true,
+     "P1: band price recorded separately as signal_px (never the fill)",
+     "6146.224438089721"
+    ],
+    [
+     true,
+     "P1: stop recomputed from the fill (fill + 1.2*sigma, independent math)",
+     "6282.4013295204995"
+    ],
+    [
+     true,
+     "P1: no cap flag yet",
+     "None"
+    ],
+    [
+     true,
+     "P2 poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "P2: ES short closed at the target (session VWAP, independent math)",
+     "1772.8777777777827"
+    ],
+    [
+     true,
+     "P2: day P&L +1772.88 >= cap $1650",
+     "1772.8777777777827"
+    ],
+    [
+     true,
+     "P2: CAP FIRED -- cap_blocked_date set in state (persists)",
+     "2026-11-06"
+    ],
+    [
+     true,
+     "P2: per-day-entry cap_blocked flag set",
+     ""
+    ],
+    [
+     true,
+     "P2: diary announces the DAILY PROFIT CAP",
+     ""
+    ],
+    [
+     true,
+     "P2: NQ signal the SAME poll is BLOCKED (account-level cap, organic)",
+     "{'date': '2026-11-06', 'vwap_n': 70218666.66666667, 'vwap_d': 2800.0, 'devs': [0.0, 66.66666666666424, 41.90476190475965], 'day_open': 25000.0, 'trades': 0, 'pos': None, 'day_realized': 0.0, 'halted': False, 'halted_reason': None, 'last_close': 25120.0, 'last_ts': '2026-11-06 13:00:00-05:00', 'mark_px': None}"
+    ],
+    [
+     true,
+     "P2: journal has exactly 1 row (no second entry anywhere)",
+     ""
+    ],
+    [
+     true,
+     "P2: n_entries still 1 (the NQ signal never became an entry)",
+     "1"
+    ],
+    [
+     true,
+     "P3: still exactly 1 journal row at 14:40 (no same-day re-entry)",
+     ""
+    ],
+    [
+     true,
+     "P3: cap flag survives further polls",
+     "2026-11-06"
+    ],
+    [
+     true,
+     "P4 EOD poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "P4: DAY SUMMARY written for 2026-11-06",
+     "LIVE Fri 11-06 16:20 ET | cum $+1772.88 | open: flat | Apex floor -727 | Topstep floor -227 | feed ES:ok NQ:ok\n**DAY SUMMARY 2026-11-06** \u2014 trades: 1, day P&L: "
+    ],
+    [
+     true,
+     "P4: summary shows the capped day P&L $+1772.88",
+     "['**DAY SUMMARY 2026-11-06** \u2014 trades: 1, day P&L: $+1772.88, cumulative: $+1772.88 (+59% of $3,000 target) DAILY PROFIT CAP active today: account day P&L +1772.88 reached the $1650 consistency cap (bot-side daily profit cap) Topstep 50K: profit +1773/3000, floor -227, tdays 1, best day $+1773, fees $0, attempts 1 Apex 50K: profit +1773/3000, floor -727, tdays 1, best day $+1773, fees $0, attempts 1']"
+    ],
+    [
+     true,
+     "P4: summary carries the DAILY PROFIT CAP line",
+     ""
+    ],
+    [
+     true,
+     "P4: trading_days == 1, topstep tdays == 1 (one real trading day)",
+     "(1, 1)"
+    ],
+    [
+     true,
+     "P4: best_day tracked truthfully at the real closed day P&L (PASS gate stays strict)",
+     "1772.8777777777827"
+    ],
+    [
+     true,
+     "P4: PASS gate blocks this attempt (best day >= 55% cap)",
+     "None"
+    ],
+    [
+     true,
+     "P5 poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "P5: NEXT trading day (Nov-9) entry allowed again (cap reset)",
+     "2026-11-09_ES_01"
+    ],
+    [
+     true,
+     "P5: stale cap_blocked_date (Nov-6) inert on the new day",
+     "2026-11-06"
+    ],
+    [
+     true,
+     "gate[cond]: BLOCKED (flag deleted -> live condition (day 1700 >= 1650) blocks)",
+     "['RESULT: BLOCKED (trades=0, cap_date=None, halted_date=None, cap=1650.0)']"
+    ],
+    [
+     true,
+     "gate[flag]: BLOCKED (flag alone blocks although day P&L is only 1000)",
+     "['RESULT: BLOCKED (trades=0, cap_date=2026-11-09, halted_date=None, cap=1650.0)']"
+    ],
+    [
+     true,
+     "gate[reset]: ENTRY (stale past-day flag + day P&L 200 -> entry allowed)",
+     "['RESULT: ENTRY opened at 6220.0 (id 2026-11-09_ES_01)']"
+    ],
+    [
+     true,
+     "gate[apex]: ENTRY (topstep overlay done -> no consistency cap applies)",
+     "['RESULT: ENTRY opened at 6220.0 (id 2026-11-09_ES_01)']"
+    ]
+   ]
+  },
+  "F2 N2 day-scoped accounting (outage days + replay regression)": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "S1 poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "S1: EOD day P&L shows TODAY's +$200.00 (yesterday's -300 filtered out)",
+     "['**DAY SUMMARY 2026-11-06** \u2014 trades: 1, day P&L: $+200.00, cumulative: $+200.00 (+7% of $3,000 target) Topstep 50K: profit +200/3000, floor -1800, tdays 1, best day $+200, fees $0, attempts 1 Apex 50K: profit +200/3000, floor -2300, tdays 1, best day $+200, fees $0, attempts 1']"
+    ],
+    [
+     true,
+     "S1: trading_days == 1 (ES really traded today)",
+     "1"
+    ],
+    [
+     true,
+     "S1: topstep tdays == 1, best_day == +200 (not -100)",
+     "(1, 200.0)"
+    ],
+    [
+     true,
+     "S1: the open NQ position is preserved (feed outage must not close it)",
+     ""
+    ],
+    [
+     true,
+     "S1: equity row day mark = +200 (filtered)",
+     "['2026-11-05T00:18:44.912902-05:00,200.0,200.0']"
+    ],
+    [
+     true,
+     "S2 poll exits 0",
+     ""
+    ],
+    [
+     true,
+     "S2: EOD summary written with trades: 0",
+     "['**DAY SUMMARY 2026-11-06** \u2014 trades: 0, day P&L: $+0.00, cumulative: $-300.00 (-10% of $3,000 target) Topstep 50K: profit -300/3000, floor -2000, tdays 0, best day $+0, fees $0, attempts 1 Apex 50K: profit -300/3000, floor -2500, tdays 0, best day $+0, fees $0, attempts 1']"
+    ],
+    [
+     true,
+     "S2: day P&L shows $+0.00 (stale -300 filtered out)",
+     "['**DAY SUMMARY 2026-11-06** \u2014 trades: 0, day P&L: $+0.00, cumulative: $-300.00 (-10% of $3,000 target) Topstep 50K: profit -300/3000, floor -2000, tdays 0, best day $+0, fees $0, attempts 1 Apex 50K: profit -300/3000, floor -2500, tdays 0, best day $+0, fees $0, attempts 1']"
+    ],
+    [
+     true,
+     "S2: trading_days NOT incremented (no trade happened today)",
+     "0"
+    ],
+    [
+     true,
+     "S2: topstep tdays NOT incremented (min-days progress not inflated)",
+     "0"
+    ],
+    [
+     true,
+     "S2: best_day stays 0.0",
+     "0.0"
+    ],
+    [
+     true,
+     "replay regression: date=None keeps the pre-fix semantics (sums ALL day entries: 400 + (-100) = 300 -> best_day 300)",
+     "300.0"
+    ]
+   ]
+  },
+  "F3 N3 idempotent EOD diary write": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "recovery run still RETURNS the summary text (run_live prints it)",
+     ""
+    ],
+    [
+     true,
+     "N3 FIXED: exactly ONE DAY SUMMARY block after the crash+recovery",
+     "1"
+    ],
+    [
+     true,
+     "accounting recovers single-count (tdays 1, trading_days 1, 1 equity row)",
+     "(1, 1, 1)"
+    ],
+    [
+     true,
+     "normal path: eod_summary returns None once last_summary is set",
+     ""
+    ]
+   ]
+  },
+  "F4 N4 reachable replay abort guard": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "broken resolver -> replay ABORTS with a clear message",
+     "ABORT: replay directory resolves onto the live files -- refusing to run."
+    ],
+    [
+     true,
+     "aborted replay wrote NOTHING into the home",
+     "{}"
+    ],
+    [
+     true,
+     "normal replay still runs under the new guard",
+     "REPLAY of last 2 stored RTH sessions through the paper engine (2 micros/symbol, real costs; ISOLATED journal: /home/z/my-project/fixes_workspace/f4/replay/trade"
+    ],
+    [
+     true,
+     "normal replay wrote only under replay/ (no live files in the home root)",
+     ""
+    ]
+   ]
+  },
+  "F5 N5 remediate_data re-run safety": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "re-run exits 0",
+     ""
+    ],
+    [
+     true,
+     "re-run: archive NOT overwritten (all archived files byte-identical)",
+     "({'README.txt': 'e90eb715ee1aaa1d9b4bb213552d2b03', 'equity.csv': '1d2da6fb31f256e4f1a91e02aa9aafbe', 'log.md': '4ee75d90d38971057fdb3254fa02496f', 'state.json': '488b1307f8145914c9ccaf60d92e2be0', 'trades.csv': 'e2e6d234a6a66136235c36182b7ba16b'}, {'README.txt': 'e90eb715ee1aaa1d9b4bb213552d2b03', 'equity.csv': '1d2da6fb31f256e4f1a91e02aa9aafbe', 'log.md': '4ee75d90d38971057fdb3254fa02496f', 'state.json': '488b1307f8145914c9ccaf60d92e2be0', 'trades.csv': 'e2e6d234a6a66136235c36182b7ba16b'})"
+    ],
+    [
+     true,
+     "re-run: journal and diary untouched (byte-identical)",
+     ""
+    ],
+    [
+     true,
+     "re-run: output reports the skips",
+     "backup verified: /home/z/my-project/remediation_workspace/backup_live_data_2026-11-05\narchive already complete -> NOT overwritten (pre-remediation originals preserved): /home/z/my-project/fixes_workspace/f5_rerun/archive/pre_remediation_2026-11-05\njournal header already v2 -> rewrite skipped (0 live"
+    ],
+    [
+     true,
+     "first run (v1-like home) exits 0",
+     ""
+    ],
+    [
+     true,
+     "first run: journal is v2-header-only (0 live rows)",
+     "['mode,trade_id,ts,sym,side,contracts,signal_px,signal_ts,entry_px,entry_ts,exit_ts,exit_px,reason,fill_method,exec_lag_min,gross_usd,costs_usd,net_usd,cum_eq']"
+    ],
+    [
+     true,
+     "first run: diary restarted with the v2 header",
+     ""
+    ],
+    [
+     true,
+     "first run: state v2, cum 0, 0 trades",
+     ""
+    ],
+    [
+     true,
+     "first run: contaminated v1 journal archived (9 lines: header + 8 replay rows)",
+     "9"
+    ],
+    [
+     true,
+     "second run on the remediated home also exits 0",
+     ""
+    ],
+    [
+     true,
+     "second run: archive STILL byte-identical (the N5 destruction cannot recur)",
+     ""
+    ]
+   ]
+  },
+  "F6 cosmetic items": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "(i) journal clock semantics documented in the engine source",
+     ""
+    ],
+    [
+     true,
+     "(ii) no-quote branch marked as defence-in-depth",
+     ""
+    ],
+    [
+     true,
+     "(iii) load_state(today=...) prunes AGAINST THE GIVEN DATE: Nov-5 kept? no -- Nov-5 entry pruned, Nov-6 entry kept",
+     "['NQ']"
+    ],
+    [
+     true,
+     "(iii) pruning follows the caller's date (Nov-5): opposite selection",
+     "['ES']"
+    ]
+   ]
+  },
+  "F7 regression: both earlier suites": {
+   "status": "PASS",
+   "items": [
+    [
+     true,
+     "remediation suite (16 tests) passes",
+     "['RESULT: 16 passed, 0 failed, 16 total', 'LIVE HOME INTEGRITY: trades.csv rows after suite = 0 (expected 0)', 'saved -> /home/z/my-project/remediation_workspace/remediation_test_results.json']"
+    ],
+    [
+     true,
+     "post-audit suite (15 groups) passes",
+     "['  ok   real home state: schema v2, cum 0, no halt, no replay contamination  [(2, 0.0)]', '', '==== POST-AUDIT BENCH: 15 test groups PASS, 0 FAIL (details: /home/z/my-project/audit_workspace/post_audit/post_audit_results.json) ====']"
+    ]
+   ]
+  }
+ }
+}

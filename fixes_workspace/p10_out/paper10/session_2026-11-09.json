@@ -1,0 +1,49 @@
+{
+ "session_index": 3,
+ "target_sessions": 10,
+ "missed_so_far": [],
+ "date": "2026-11-09",
+ "polls": 20,
+ "trades": 2,
+ "by_sym": {
+  "ES": 1,
+  "NQ": 1
+ },
+ "wins": 1,
+ "day_pnl": -76.5,
+ "costs": 11.7,
+ "cum": 25.54,
+ "n_trades_total": 5,
+ "trading_days": 3,
+ "halted": false,
+ "capped": false,
+ "feed_status": {},
+ "overlays": "Topstep floor -1974 tdays 3 best $+170; Apex floor -2474 tdays 3 best $+170",
+ "summary_line": "trades: 2, day P&L: $-76.50, cumulative: $+25.54",
+ "rows": [
+  {
+   "trade_id": "2026-11-09_ES_01",
+   "sym": "ES",
+   "side": "short",
+   "contracts": "2",
+   "entry_px": "6145.0",
+   "exit_px": "6210.2",
+   "reason": "stop",
+   "fill_method": "poll_quote",
+   "net_usd": "-709.7",
+   "cum_eq": "-607.66"
+  },
+  {
+   "trade_id": "2026-11-09_NQ_01",
+   "sym": "NQ",
+   "side": "long",
+   "contracts": "4",
+   "entry_px": "25100.0",
+   "exit_px": "25180.0",
+   "reason": "tp",
+   "fill_method": "poll_quote",
+   "net_usd": "633.2",
+   "cum_eq": "25.54"
+  }
+ ]
+}
